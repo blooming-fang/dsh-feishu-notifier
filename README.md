@@ -50,7 +50,7 @@ pnpm dsh --profile web
 建议使用 release tag 或 commit SHA，确保安装内容可复现：
 
 ```sh
-pnpm dsh plugin --profile demo add github:blooming-fang/dsh-feishu-notifier#v0.1.0
+pnpm dsh plugin --profile demo add github:blooming-fang/dsh-feishu-notifier
 ```
 
 从 GitHub 安装时会执行 `prepare` 构建插件。只应安装可信仓库中的代码；pnpm 可能要求在 Profile 的 workspace 配置中加入 `allowBuilds` 授权。
