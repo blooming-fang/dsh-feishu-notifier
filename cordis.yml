@@ -1,0 +1,5 @@
+- insert:
+    - id: feishu-notifier
+      name: dsh-feishu-notifier
+      config:
+        enabled: true
