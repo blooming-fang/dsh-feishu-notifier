@@ -1,6 +1,6 @@
 {
   "name": "dsh-feishu-notifier",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Send DeepSeek Harness interaction and turn notifications to a Feishu bot",
   "license": "MIT",
   "type": "module",
