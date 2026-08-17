@@ -1,35 +1,56 @@
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 
-export interface FeishuSettings {
+export interface FeishuConfigView {
   enabled: boolean
-  webhook?: string
+  webhookConfigured: boolean
 }
 
-interface Injected {
-  scope: SettingsScope<FeishuSettings>
+export interface FeishuController {
+  config?: FeishuConfigView
+  load: () => Promise<FeishuConfigView>
+  update: (patch: { enabled?: boolean; webhook?: string }) => Promise<FeishuConfigView>
+  test: () => Promise<string>
 }
 
-type Props = PropsRuntime<'settings.section'> & Injected
+type Props = PropsRuntime<'settings.section'> & { controller: FeishuController }
 
-export function FeishuSettingsSection({ scope }: Props) {
-  const [snapshot, setSnapshot] = useState(scope.getSnapshot())
+type ViewState =
+  | { status: 'loading' }
+  | { status: 'ready'; config: FeishuConfigView }
+
+export function FeishuSettingsSection({ controller }: Props) {
+  const [view, setView] = useState<ViewState>({ status: 'loading' })
   const [webhook, setWebhook] = useState('')
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
 
-  useEffect(() => scope.subscribe(() => { setSnapshot(scope.getSnapshot()) }), [scope])
+  useEffect(() => {
+    let active = true
+    void controller.load()
+      .then(config => {
+        if (active) setView({ status: 'ready', config })
+      })
+      .catch(error => {
+        if (active) setStatus(error instanceof Error ? error.message : String(error))
+      })
+    return () => { active = false }
+  }, [controller])
 
-  const enabled = snapshot.value?.enabled ?? true
-  const saveEnabled = async (value: boolean) => {
+  const config = view.status === 'ready' ? view.config : { enabled: true, webhookConfigured: false }
+
+  const save = async (patch: { enabled?: boolean; webhook?: string }, message: string) => {
+    setBusy(true)
     setStatus('正在保存…')
     try {
-      await scope.set('enabled', value)
-      setStatus(value ? '通知已开启' : '通知已关闭')
+      const next = await controller.update(patch)
+      setView({ status: 'ready', config: next })
+      setStatus(message)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -39,27 +60,15 @@ export function FeishuSettingsSection({ scope }: Props) {
       setStatus('请输入 Webhook 地址')
       return
     }
-    setBusy(true)
-    setStatus('正在保存…')
-    try {
-      await scope.set('webhook', value)
-      setWebhook('')
-      setStatus('Webhook 已保存')
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy(false)
-    }
+    await save({ webhook: value }, 'Webhook 已保存到 DSH 设置文件')
+    setWebhook('')
   }
 
   const sendTest = async () => {
     setBusy(true)
     setStatus('正在发送测试消息…')
     try {
-      const response = await fetch('/api/feishu-notifier/test', { method: 'POST' })
-      const result = await response.json() as { ok?: boolean; message?: string }
-      if (!response.ok || result.ok !== true) throw new Error(result.message ?? `HTTP ${String(response.status)}`)
-      setStatus(result.message ?? '测试消息已发送')
+      setStatus(await controller.test())
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error))
     } finally {
@@ -81,7 +90,13 @@ export function FeishuSettingsSection({ scope }: Props) {
             <strong style={{ display: 'block' }}>启用通知</strong>
             <small style={{ color: 'var(--dsw-alias-label-secondary)' }}>关闭后不会发送任何飞书消息。</small>
           </span>
-          <input aria-label="启用通知" type="checkbox" checked={enabled} onChange={event => { void saveEnabled(event.target.checked) }} />
+          <input
+            aria-label="启用通知"
+            type="checkbox"
+            checked={config.enabled}
+            disabled={busy || view.status === 'loading'}
+            onChange={event => { void save({ enabled: event.target.checked }, event.target.checked ? '通知已开启' : '通知已关闭') }}
+          />
         </label>
         <label style={{ display: 'grid', gap: 8 }}>
           <span><strong>Webhook 地址</strong></span>
@@ -89,17 +104,17 @@ export function FeishuSettingsSection({ scope }: Props) {
             aria-label="Webhook 地址"
             type="url"
             value={webhook}
-            placeholder="已保存的地址不会回显；输入新地址以替换"
+            placeholder={config.webhookConfigured ? '已配置地址；输入新地址以替换' : '请输入飞书机器人 Webhook'}
+            disabled={busy || view.status === 'loading'}
             onChange={event => { setWebhook(event.target.value); setStatus('') }}
             style={{ minHeight: 40, padding: '0 12px', borderRadius: 10, border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)', color: 'inherit' }}
           />
         </label>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-          <Button variant="primary" size="sm" disabled={busy || !snapshot.writable} onClick={() => { void saveWebhook() }}>保存 Webhook</Button>
-          <Button variant="outline" size="sm" disabled={busy || !snapshot.writable} onClick={() => { void sendTest() }}>发送测试消息</Button>
+          <Button variant="primary" size="sm" disabled={busy || view.status === 'loading'} onClick={() => { void saveWebhook() }}>保存 Webhook</Button>
+          <Button variant="outline" size="sm" disabled={busy || view.status === 'loading' || !config.webhookConfigured} onClick={() => { void sendTest() }}>发送测试消息</Button>
         </div>
         {status !== '' && <p role="status" style={{ margin: 0, color: 'var(--dsw-alias-label-secondary)' }}>{status}</p>}
-        {snapshot.status === 'unavailable' && <p role="alert">当前连接不支持持久化设置。</p>}
       </div>
     </section>
   )

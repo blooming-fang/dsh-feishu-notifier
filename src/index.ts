@@ -5,9 +5,10 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
 
 export const name = 'dsh-feishu-notifier'
+export const inject = ['settings', 'webServer']
 
 export interface Config {
   enabled: boolean
@@ -20,6 +21,7 @@ export const Config: z<Config> = z.object({
 })
 
 const SETTINGS_NAMESPACE = settingsNamespace('feishu-notifier')
+const CONFIG_PATH = '/api/feishu-notifier/config'
 const TEST_PATH = '/api/feishu-notifier/test'
 
 type MessageKind = 'approval' | 'turn-end'
@@ -58,10 +60,37 @@ export function turnReasonText(reason: unknown): string {
   }
 }
 
-async function sendText(current: () => Config, text: string): Promise<void> {
-  const config = current()
-  const webhook = config.webhook.trim()
-  if (!config.enabled || webhook === '') return
+function configView(config: Config): { enabled: boolean; webhookConfigured: boolean } {
+  return { enabled: config.enabled, webhookConfigured: config.webhook.trim() !== '' }
+}
+
+function writeJson(res: ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value)
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(body)
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) chunks.push(Buffer.from(chunk))
+  if (chunks.length === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    throw new Error('请求体不是有效 JSON')
+  }
+}
+
+function webhookOf(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') throw new Error('请提供 Webhook 地址')
+  const webhook = value.trim()
+  const url = new URL(webhook)
+  if (url.protocol !== 'https:') throw new Error('Webhook 必须使用 HTTPS 地址')
+  return webhook
+}
+
+async function sendText(config: Config, text: string): Promise<void> {
+  const webhook = webhookOf(config.webhook)
   const response = await fetch(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -81,20 +110,51 @@ async function sendText(current: () => Config, text: string): Promise<void> {
   }
 }
 
-function writeJson(res: ServerResponse, status: number, value: unknown): void {
-  const body = JSON.stringify(value)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(body)
+async function handleConfig(
+  req: IncomingMessage,
+  res: ServerResponse,
+  scope: SettingsScope<Config>,
+): Promise<void> {
+  if (req.method === 'GET') {
+    writeJson(res, 200, { ok: true, config: configView(scope.get()) })
+    return
+  }
+  if (req.method !== 'POST') {
+    res.writeHead(405, { allow: 'GET, POST' })
+    res.end()
+    return
+  }
+  try {
+    const body = recordOf(await readJson(req))
+    if (body === undefined) throw new Error('请求体必须是 JSON 对象')
+    const patch: Partial<Config> = {}
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
+      patch.enabled = body.enabled
+    }
+    if (body.webhook !== undefined) patch.webhook = webhookOf(body.webhook)
+    if (Object.keys(patch).length === 0) throw new Error('没有可保存的配置')
+    await scope.update(patch)
+    writeJson(res, 200, { ok: true, config: configView(scope.get()) })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    writeJson(res, 400, { ok: false, message })
+  }
 }
 
-async function handleTest(req: IncomingMessage, res: ServerResponse, current: () => Config): Promise<void> {
+async function handleTest(req: IncomingMessage, res: ServerResponse, scope: SettingsScope<Config>): Promise<void> {
   if (req.method !== 'POST') {
     res.writeHead(405, { allow: 'POST' })
     res.end()
     return
   }
+  const config = scope.get()
+  if (!config.enabled) {
+    writeJson(res, 409, { ok: false, message: '飞书通知当前已关闭' })
+    return
+  }
   try {
-    await sendText(current, '这是一条来自 DeepSeek Harness 的飞书通知测试消息。')
+    await sendText(config, '这是一条来自 DeepSeek Harness 的飞书通知测试消息。')
     writeJson(res, 200, { ok: true, message: '测试消息已发送' })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -103,17 +163,17 @@ async function handleTest(req: IncomingMessage, res: ServerResponse, current: ()
 }
 
 function notify(current: () => Config, kind: MessageKind, detail: string): void {
-  void sendText(current, textFor(kind, detail)).catch(error => {
+  const config = current()
+  if (!config.enabled || config.webhook.trim() === '') return
+  void sendText(config, textFor(kind, detail)).catch(error => {
     console.warn(`[feishu-notifier] notification failed: ${String(error)}`)
   })
 }
 
 export function apply(ctx: Context, config: Config): void {
-  let current: () => Config = () => config
-  installSettingsSection(ctx, SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source },
-    onChange: () => {},
-  })
+  const scope = ctx.settings.register(SETTINGS_NAMESPACE, Config, { base: config })
+  let current = (): Config => scope.get()
+  scope.watch(() => { current = () => scope.get() })
 
   ctx.on('approval/request', (request, next) => {
     notify(current, 'approval', request.reason ?? `工具 ${request.toolName} 正在等待批准。`)
@@ -132,14 +192,20 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  ctx.inject(['webServer'], webCtx => {
-    webCtx.effect(
-      () => webCtx.webServer.register({
-        kind: 'exact',
-        path: TEST_PATH,
-        handler: (req, res) => handleTest(req, res, current),
-      }),
-      'feishu-notifier: test route',
-    )
-  })
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: CONFIG_PATH,
+      handler: (req, res) => handleConfig(req, res, scope),
+    }),
+    'feishu-notifier: config route',
+  )
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: TEST_PATH,
+      handler: (req, res) => handleTest(req, res, scope),
+    }),
+    'feishu-notifier: test route',
+  )
 }
