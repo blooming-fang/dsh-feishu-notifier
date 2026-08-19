@@ -180,8 +180,10 @@ export function apply(ctx: Context, config: Config): void {
     return next()
   })
 
-  ctx.on('session/event', (_session, event) => {
+  ctx.on('session/event', (session, event) => {
     if (event.type === 'turn/end') {
+      // 子代理拥有独立的 session；只通知主会话的轮次结束，避免每个子代理完成时发送飞书消息。
+      if (session.header.origin === 'subagent') return
       notify(current, 'turn-end', `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`)
     }
     if (event.type === 'tool/call'
