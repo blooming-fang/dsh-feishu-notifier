@@ -8,6 +8,8 @@
 - Node.js `22.19+`。
 - 在 Web 设置中配置飞书自定义机器人 Webhook。
 
+![飞书通知](./docs/images/1.png)
+
 ## 本地开发
 
 ```sh
@@ -44,6 +46,8 @@ pnpm dsh --profile web
 ```
 
 填写飞书机器人 Webhook，点击“保存 Webhook”，然后点击“发送测试消息”验证连接。配置会通过插件自己的 Host API 持久化到 DSH 的 `settings.yaml`，通常位于 `C:\Users\<用户名>\.dsh\settings.yaml`。真实 Webhook 不会包含在 npm 包中，每位用户都需要配置自己的地址。
+
+![配置界面](./docs/images/2.png)
 
 ## 从 GitHub 安装
 
