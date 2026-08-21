@@ -85,19 +85,47 @@ export function FeishuSettingsSection({ controller }: Props) {
         </p>
       </div>
       <div style={{ display: 'grid', gap: 16, padding: 20, border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 16 }}>
-        <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
           <span>
             <strong style={{ display: 'block' }}>启用通知</strong>
             <small style={{ color: 'var(--dsw-alias-label-secondary)' }}>关闭后不会发送任何飞书消息。</small>
           </span>
-          <input
+          <button
+            type="button"
+            role="switch"
+            aria-checked={config.enabled}
             aria-label="启用通知"
-            type="checkbox"
-            checked={config.enabled}
             disabled={busy || view.status === 'loading'}
-            onChange={event => { void save({ enabled: event.target.checked }, event.target.checked ? '通知已开启' : '通知已关闭') }}
-          />
-        </label>
+            onClick={() => { void save({ enabled: !config.enabled }, !config.enabled ? '通知已开启' : '通知已关闭') }}
+            style={{
+              position: 'relative',
+              width: 44,
+              height: 26,
+              padding: 2,
+              borderRadius: 999,
+              border: '1px solid var(--dsw-alias-border-l1)',
+              background: config.enabled ? 'var(--dsw-alias-bg-accent, #165DFF)' : 'var(--dsw-alias-bg-layer-3, #e5e7eb)',
+              cursor: busy || view.status === 'loading' ? 'not-allowed' : 'pointer',
+              opacity: busy || view.status === 'loading' ? 0.6 : 1,
+              transition: 'background 150ms ease, opacity 150ms ease',
+              flexShrink: 0,
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                display: 'block',
+                width: 20,
+                height: 20,
+                borderRadius: 999,
+                background: '#fff',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                transform: config.enabled ? 'translateX(18px)' : 'translateX(0)',
+                transition: 'transform 150ms ease',
+              }}
+            />
+          </button>
+        </div>
         <label style={{ display: 'grid', gap: 8 }}>
           <span><strong>Webhook 地址</strong></span>
           <input
