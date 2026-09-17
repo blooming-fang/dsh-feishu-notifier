@@ -7,6 +7,34 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 
+interface QuestionOption {
+  label: string
+  description?: string
+}
+
+interface QuestionItem {
+  id: string
+  question: string
+  detail?: string
+  header?: string
+  options?: QuestionOption[]
+  multiSelect?: boolean
+  intent?: { kind: string; approve?: string }
+}
+
+interface UserQuestionRequest {
+  questions: QuestionItem[]
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'user-questions/request'(
+      request: UserQuestionRequest,
+      next: () => Promise<unknown>,
+    ): Promise<unknown>
+  }
+}
+
 export const name = 'dsh-feishu-notifier'
 export const inject = ['settings', 'webServer']
 
@@ -24,12 +52,39 @@ const SETTINGS_NAMESPACE = 'feishu-notifier'
 const CONFIG_PATH = '/api/feishu-notifier/config'
 const TEST_PATH = '/api/feishu-notifier/test'
 
-type MessageKind = 'approval' | 'turn-end'
+type MessageKind = 'approval' | 'plan-review' | 'question' | 'turn-end'
 
 function textFor(kind: MessageKind, detail: string): string {
-  return kind === 'approval'
-    ? `DeepSeek Harness 需要你的操作\n${detail}`
-    : `DeepSeek Harness 对话已结束\n${detail}`
+  switch (kind) {
+    case 'approval':
+      return `DeepSeek Harness【任务待审批】\n${detail}`
+    case 'plan-review':
+      return `DeepSeek Harness【计划待确认】\n${detail}`
+    case 'question':
+      return `DeepSeek Harness【等待你的回答】\n${detail}`
+    case 'turn-end':
+      return `DeepSeek Harness 对话已结束\n${detail}`
+  }
+}
+
+function formatPlanDetail(q: QuestionItem): string {
+  const plan = q.detail?.trim()
+  if (!plan) return q.question
+  const preview = plan.length > 500 ? `${plan.slice(0, 500)}\n...（完整计划请前往 Web 界面查看）` : plan
+  return `${q.question}\n\n${preview}`
+}
+
+function formatQuestionDetail(q: QuestionItem): string {
+  const title = q.header ? `[${q.header}] ${q.question}` : q.question
+  if (!q.options || q.options.length === 0) {
+    return title
+  }
+  const mode = q.multiSelect ? '（可多选）' : '（单选）'
+  const options = q.options.map((opt, i) => {
+    const desc = opt.description ? ` (${opt.description})` : ''
+    return `  ${i + 1}. ${opt.label}${desc}`
+  }).join('\n')
+  return `${title} ${mode}\n${options}`
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -177,21 +232,32 @@ export function apply(ctx: Context, config: Config): void {
   scope.watch(() => { current = () => scope.get() })
 
   ctx.on('approval/request', (request, next) => {
-    notify(current, 'approval', request.reason ?? `工具 ${request.toolName} 正在等待批准。`)
+    const detail = request.reason
+      ? `工具 ${request.toolName} 申请操作：\n${request.reason}`
+      : `工具 ${request.toolName} 正在等待批准。`
+    notify(current, 'approval', detail)
     return next()
-  })
+  }, { prepend: true })
+
+  ctx.on('user-questions/request', (request, next) => {
+    if (request.questions && request.questions.length > 0) {
+      const isPlan = request.questions.some(q => q.intent?.kind === 'plan-review')
+      if (isPlan) {
+        const detail = request.questions.map(formatPlanDetail).join('\n\n')
+        notify(current, 'plan-review', detail)
+      } else {
+        const detail = request.questions.map(formatQuestionDetail).join('\n\n')
+        notify(current, 'question', detail)
+      }
+    }
+    return next()
+  }, { prepend: true })
 
   ctx.on('session/event', (session, event) => {
     if (event.type === 'turn/end') {
       // 子代理拥有独立的 session；只通知主会话的轮次结束，避免每个子代理完成时发送飞书消息。
       if (session.header.origin === 'subagent') return
       notify(current, 'turn-end', `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`)
-    }
-    if (event.type === 'tool/call'
-      && (event.data.name === 'ask_user_question' || event.data.name === 'exit_plan_mode')) {
-      notify(current, 'approval', event.data.name === 'exit_plan_mode'
-        ? '智能体正在等待你确认计划。'
-        : '智能体正在等待你回答问题。')
     }
   })
 
