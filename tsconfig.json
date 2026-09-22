@@ -5,6 +5,8 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "strict": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
     "skipLibCheck": true,
     "noEmit": true
   },

@@ -1,6 +1,6 @@
 {
   "name": "dsh-feishu-notifier",
-  "version": "0.1.7",
+  "version": "0.2.2",
   "description": "Send DeepSeek Harness interaction and turn notifications to a Feishu bot",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,7 @@
     "LICENSE",
     "package.json"
   ],
-  "Keywords": [
+  "keywords": [
     "dsh",
     "deepseek",
     "harness",
@@ -49,25 +49,30 @@
     "build": "node ./scripts/build.mjs",
     "prepare": "pnpm run build",
     "prepublishOnly": "pnpm run build",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node ./scripts/smoke.mjs",
     "pack:check": "pnpm pack --dry-run"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/cordis": "^4.0.3",
+    "@deepseek-ai/dsh-settings": "^0.1.7-alpha.1"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.3"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-agent": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-session": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-user-approval": "^0.1.5-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/cordis": "^4.0.3",
+    "@deepseek-ai/dsh-agent": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-session": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-settings": "^0.1.7-alpha.1",
+    "@deepseek-ai/dsh-user-approval": "^0.1.7-alpha.1",
+    "@types/node": "^26.4.0",
     "@types/react": "^18.3.1",
     "react": "^18.2.0",
     "tsdown": "^0.22.2",

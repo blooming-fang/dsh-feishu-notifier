@@ -2,34 +2,21 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { FeishuSettingsSection, type FeishuController } from './FeishuSettingsSection.tsx'
+import { FeishuSettingsSection, type FeishuController, type FeishuSection } from './FeishuSettingsSection.tsx'
 
-export const inject = ['slots']
+/** Settings namespace of this plugin: the profile entry id its bundle patch inserts. */
+const SETTINGS_NAMESPACE = 'feishu-notifier'
+const TEST_PATH = '/api/feishu-notifier/test'
+
+export const inject = ['slots', 'configForms']
 
 export function apply(ctx: ClientContext): void {
   const controller: FeishuController = {
-    load: async () => {
-      const response = await fetch('/api/feishu-notifier/config')
-      const result = await response.json() as { ok?: boolean; message?: string; config?: FeishuController['config'] }
-      if (!response.ok || result.ok !== true || result.config === undefined) {
-        throw new Error(result.message ?? `HTTP ${String(response.status)}`)
-      }
-      return result.config
-    },
-    update: async (patch) => {
-      const response = await fetch('/api/feishu-notifier/config', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(patch),
-      })
-      const result = await response.json() as { ok?: boolean; message?: string; config?: FeishuController['config'] }
-      if (!response.ok || result.ok !== true || result.config === undefined) {
-        throw new Error(result.message ?? `HTTP ${String(response.status)}`)
-      }
-      return result.config
-    },
+    namespace: SETTINGS_NAMESPACE,
+    form: ctx.configForms.get<FeishuSection>(SETTINGS_NAMESPACE),
+    mirror: ctx.configForms.describe(),
     test: async () => {
-      const response = await fetch('/api/feishu-notifier/test', { method: 'POST' })
+      const response = await fetch(TEST_PATH, { method: 'POST' })
       const result = await response.json() as { ok?: boolean; message?: string }
       if (!response.ok || result.ok !== true) throw new Error(result.message ?? `HTTP ${String(response.status)}`)
       return result.message ?? '测试消息已发送'
@@ -38,7 +25,7 @@ export function apply(ctx: ClientContext): void {
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
-    id: 'feishu-notifier',
+    id: SETTINGS_NAMESPACE,
     order: 25,
     label: () => '飞书通知',
     inject: (): { controller: FeishuController } => ({ controller }),
