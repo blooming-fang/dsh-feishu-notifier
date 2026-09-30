@@ -6,7 +6,7 @@
 
 ## 使用要求
 
-- DeepSeek Harness `0.1.7-alpha.1` 或兼容版本。
+- DeepSeek Harness `0.2.0-rc.1` 或兼容版本。
 - Node.js `22.19+`。
 - 在 Web 设置中配置飞书自定义机器人 Webhook。
 
@@ -21,7 +21,7 @@ pnpm run build
 pnpm pack:check
 ```
 
-`pnpm run smoke` 会用桩上下文加载 `lib/index.js` 与 `lib/client.js`，校验通知分发、设置契约（volatile 字段与 secret 脱敏）以及 `settings.section` 注册，可在升级 DSH 后快速回归。
+`pnpm run smoke` 会用桩上下文加载 `lib/index.js` 与 `lib/client.js`，校验通知分发、设置契约（volatile 字段与 secret 脱敏）、`settings.section` 注册，并复刻 `dsh-app-boot` 的插件版本校验、断言每个 dsh peer 范围都能接纳目标运行时版本 —— 升级 DSH 后应优先运行它，版本范围失配会在这里而非启动时报错。
 
 构建会生成：
 
@@ -79,9 +79,23 @@ pnpm dsh plugin --profile demo add github:blooming-fang/dsh-feishu-notifier
 Webhook 属于敏感设置（Config 中声明为 `role('secret')`），保存后不会返回给浏览器。不要把真实 Webhook 地址提交到 GitHub 或发布到 npm。
 
 
-## 从 0.1.x 升级
+## 从旧版本升级
 
-DSH `0.1.7-alpha.1` 用 settings 服务的配置表单取代了旧的 `ctx.settings.register` scope API。本插件 `0.2.2` 已完成适配：
+### 从 0.2.x 升级到 0.3.0（DSH 0.2.0-rc.1）
+
+DSH `0.2.0-rc.1` 新增了插件版本校验：启动导入插件前，`dsh-app-boot` 会读取插件 `package.json` 的 `peerDependencies`，把所有 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 声明与当前运行时版本逐一比对（含预发布版本）。任一范围不匹配即拒绝加载该插件并提示 `Plugin ... is incompatible with dsh ...`。
+
+因此本次升级是**必需的**，而不是可选的：插件 `0.2.2` 声明的 `@deepseek-ai/dsh-settings: ^0.1.7-alpha.1` 无法满足 `0.2.0-rc.1`，会在启动时被直接拒绝。`0.3.0` 的改动：
+
+- 所有 `@deepseek-ai/dsh-*` 依赖与 peer 范围提升到 `^0.2.0-rc.1`，`@deepseek-ai/cordis` 提升到 `^4.0.4`，`@deepseek-ai/schemastery` 提升到 `^3.18.4`；
+- 新增 `scripts/smoke.mjs` 版本校验回归：用 `semver` 复刻 `dsh-app-boot` 的判定逻辑，断言每个 dsh peer 范围都能接纳目标运行时版本，避免下次再出现同类静默失败；
+- 面向 DSH 0.2.0-rc.1 重新构建 `lib/index.js` 与 `lib/client.js`。
+
+插件使用的 settings、webServer、slots/configForms、session 事件与 `__ModuleLoader__` 客户端契约在 0.2.0-rc.1 中均未发生破坏性变化，因此业务代码无需改动。
+
+### 从 0.1.x 升级到 0.2.x（DSH 0.1.7-alpha.1）
+
+DSH `0.1.7-alpha.1` 用 settings 服务的配置表单取代了旧的 `ctx.settings.register` scope API：
 
 - 配置项改为 `volatile` 字段，设置服务就地更新，插件无需重新挂载即可读到最新值；
 - 浏览器端改用 `ctx.configForms` 读写命名空间 `feishu-notifier`，Webhook 仍为只写字段；

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { satisfies } from 'semver'
 
 let failures = 0
 const check = (label, cond) => {
@@ -6,6 +7,34 @@ const check = (label, cond) => {
   if (!cond) failures++
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+
+// ------------------------------------------------------- DSH compatibility
+// DSH 0.2.0-rc.1 denies a plugin whose package.json declares a
+// `@deepseek-ai/dsh` or `@deepseek-ai/dsh-*` peer range that the running
+// runtime version does not satisfy (`evaluatePluginCompatibility` in
+// dsh-app-boot), so a stale range fails at startup with no code-level symptom.
+// Mirror that gate here, against the DSH version this build was compiled for.
+const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+const DSH_RUNTIME = manifest.devDependencies['@deepseek-ai/dsh-settings'].replace(/^[~^]/, '')
+
+check('manifest declares a concrete dsh runtime version to check against',
+  /^\d+\.\d+\.\d+/.test(DSH_RUNTIME))
+
+const dshPeers = Object.entries(manifest.peerDependencies ?? {})
+  .filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+check('manifest declares at least one dsh peer dependency', dshPeers.length > 0)
+
+for (const [name, range] of dshPeers) {
+  check(`peer ${name} ${range} admits dsh ${DSH_RUNTIME}`,
+    satisfies(DSH_RUNTIME, range, { includePrerelease: true }))
+}
+
+// A future DSH release must not be silently admitted by a caret range that
+// only reaches the prerelease it was written against, unless that is intended.
+const cordisRange = manifest.peerDependencies?.['@deepseek-ai/cordis']
+check('cordis peer range is declared', typeof cordisRange === 'string')
+check(`cordis peer ${cordisRange} admits the bundled cordis`,
+  satisfies(manifest.devDependencies['@deepseek-ai/cordis'].replace(/^[~^]/, ''), cordisRange, { includePrerelease: true }))
 
 // ---------------------------------------------------------------- host half
 const host = await import('../lib/index.js')
