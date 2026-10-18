@@ -253,6 +253,37 @@ emptyCtx.state.listeners['session/event']({ header: {} }, { type: 'turn/end', da
 await tick()
 check('unconfigured webhook sends nothing', sent.length === afterRoute)
 
+// turn/end carries the session title: the latest `session/title` event wins,
+// and a session without one keeps the plain text.
+const titled = []
+globalThis.fetch = async (url, init) => {
+  titled.push(JSON.parse(init.body))
+  return { ok: true, status: 200, text: async () => '{"code":0}' }
+}
+const titledCtx = stubHostCtx()
+host.apply(titledCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
+const emitTitled = session => titledCtx.state.listeners['session/event'](
+  session,
+  { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+)
+emitTitled({
+  header: {},
+  snapshotEvents: () => [
+    { type: 'session/title', data: { title: '旧标题' } },
+    { type: 'session/title', data: { title: '修复登录 bug' } },
+  ],
+})
+await tick()
+check('turn/end carries the latest session title',
+  titled.length === 1
+  && titled[0].card.body.elements[0].content === '会话标题：修复登录 bug\n第 2 轮：正常完成')
+
+emitTitled({ header: {}, snapshotEvents: () => [] })
+await tick()
+check('turn/end without a session title stays plain',
+  titled.length === 2
+  && titled[1].card.body.elements[0].content === '第 2 轮：正常完成')
+
 // -------------------------------------------------------------- client half
 let module
 const fakeWindow = { __ModuleLoader__: { load: (m) => { module = m } } }

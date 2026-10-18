@@ -74,9 +74,9 @@ pnpm dsh plugin --profile demo add github:blooming-fang/dsh-feishu-notifier
 - 用户审批请求（`approval/request` 瀑布事件）；
 - `ask_user_question` 用户问题请求；
 - `exit_plan_mode` 计划确认请求；
+- `turn/end` 对话轮次结束事件，并将完成、错误、取消、分叉和中断原因转换为可读文本，同时附带本轮最后一段可见的助手输出（推理内容与工具调用不会进入通知，超过 3000 字会截断）。通知还会带上该会话的最新标题（取日志中最后一条 `session/title` 事件；尚无标题时省略标题行），便于在多个并行会话之间辨认。子代理（`session.header.origin === 'subagent'`）的轮次结束不会触发通知。
 
   上面两项在两种会话形态下都会通知：普通会话记录为顶层 `tool/call`；PTC（程序化工具调用）会话的顶层调用是 `run_code`，嵌套调用记录为 `tool/ptc-dispatch-start`，插件在调用开始、提问弹出的那一刻发送通知。
-- `turn/end` 对话轮次结束事件，并将完成、错误、取消、分叉和中断原因转换为可读文本，同时附带本轮最后一段可见的助手输出（推理内容与工具调用不会进入通知，超过 3000 字会截断）。子代理（`session.header.origin === 'subagent'`）的轮次结束不会触发通知。
 
 消息格式：标题栏使用 `DSH`（如「DSH 对话已结束」「DSH 需要你的操作」），正文由卡片 JSON 2.0 的 `markdown` 组件渲染，标题、列表、代码块与链接都按 Markdown 显示。
 
