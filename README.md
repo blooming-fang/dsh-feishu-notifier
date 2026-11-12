@@ -11,6 +11,16 @@
 - 在 Web 设置中配置飞书自定义机器人 Webhook。
 
 
+## 插件元数据
+
+DSH 的「设置 → 插件」列表会显示每个插件的图标和中英双语的标题、描述，这些信息由 `dsh-app-boot` 在不执行插件代码的前提下读取：
+
+- **图标**：`package.json` 的 `icon` 字段，取包内相对路径 `./icon.svg`（只允许 SVG/PNG/JPEG/WebP，且不超过 256 KiB），运行时转成 data URL 交给界面；也可以用导出子路径 `<包名>/icon` 提供。
+- **标题与描述**：`locale/en.json`、`locale/zh.json` 的 `meta.title` / `meta.description`，按界面语言挑选；`package.json` 的 `name` 与 `description` 只作兜底。
+- 这两类资源都要经过包的 `exports` 映射（`./locale/*.json`）与 npm `files` 白名单，漏掉任何一处，界面就会退回只显示包名。
+
+`pnpm run smoke` 会校验图标路径、格式与体积，以及两个语言文件的 `meta` 字段是否齐全。
+
 ## 本地开发
 
 ```sh
@@ -89,6 +99,13 @@ Webhook 属于敏感设置（Config 中声明为 `role('secret')`），保存后
 
 
 ## 从旧版本升级
+
+### 从 0.3.3 升级到 0.3.4
+
+- 新增插件图标（`icon.svg`）：蓝色圆角磁贴 + 白色铃铛 + 琥珀色未读点，显示在「设置 → 插件」的列表行与详情卡片里。
+- 新增 `locale/en.json` 与 `locale/zh.json`：标题与描述改为中英双语，中文界面显示「飞书通知」及对应描述，不再回退到包名。
+- npm 包描述改为中文，并补充 `homepage`、`bugs` 字段。
+- `scripts/smoke.mjs` 增加插件元数据回归：图标路径/格式/体积、`meta.title` 与 `meta.description`、以及 `exports` 和 `files` 是否覆盖这些资源。
 
 ### 从 0.3.0～0.3.2 升级到 0.3.3
 

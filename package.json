@@ -1,11 +1,16 @@
 {
   "name": "dsh-feishu-notifier",
-  "version": "0.3.3",
-  "description": "Send DeepSeek Harness interaction and turn notifications to a Feishu bot",
+  "version": "0.3.4",
+  "description": "在智能体请求批准、等待你回答或一轮对话结束时，向飞书自定义机器人推送 Markdown 卡片通知；Webhook 以密钥形式保存在 DSH 设置中，可在设置页就地发送测试消息。",
+  "icon": "./icon.svg",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/blooming-fang/dsh-feishu-notifier.git"
+  },
+  "homepage": "https://github.com/blooming-fang/dsh-feishu-notifier#readme",
+  "bugs": {
+    "url": "https://github.com/blooming-fang/dsh-feishu-notifier/issues"
   },
   "type": "module",
   "packageManager": "pnpm@11.7.0",
@@ -16,12 +21,15 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
+    "locale/*.json",
     "docs",
     "cordis.yml",
+    "icon.svg",
     "README.md",
     "LICENSE",
     "package.json"
@@ -31,8 +39,9 @@
     "deepseek",
     "harness",
     "feishu",
+    "notification",
     "bot",
-    "notification"
+    "lark"
   ],
   "dsh": {
     "bundle": {

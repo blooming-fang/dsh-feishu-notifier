@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { satisfies } from 'semver'
 
 let failures = 0
@@ -35,6 +35,43 @@ const cordisRange = manifest.peerDependencies?.['@deepseek-ai/cordis']
 check('cordis peer range is declared', typeof cordisRange === 'string')
 check(`cordis peer ${cordisRange} admits the bundled cordis`,
   satisfies(manifest.devDependencies['@deepseek-ai/cordis'].replace(/^[~^]/, ''), cordisRange, { includePrerelease: true }))
+
+// ------------------------------------------------------------ plugin metadata
+// DSH's plugin manager shows each plugin's icon and language-picked title and
+// description, read by dsh-app-boot without evaluating plugin code: the icon
+// from package.json `icon` (a relative path inside the package, or an exported
+// `<specifier>/icon`), the text from `<specifier>/locale/<language>.json` under
+// `meta`. Both ride the package `exports` map and the npm `files` whitelist, so
+// a missing export or files entry silently degrades the GUI to the bare name.
+const ICON_TYPES = ['.svg', '.png', '.jpg', '.jpeg', '.webp']
+const MAX_ICON_BYTES = 256 * 1024
+const root = new URL('../', import.meta.url)
+const readMeta = (language) => {
+  const file = new URL(`locale/${language}.json`, root)
+  const meta = JSON.parse(readFileSync(file, 'utf8')).meta
+  const filled = (value) => typeof value === 'string' && value.trim() !== ''
+  return { path: file, ok: filled(meta?.title) && filled(meta?.description) }
+}
+
+check('manifest declares an icon path', typeof manifest.icon === 'string' && manifest.icon.startsWith('./'))
+const iconFile = new URL(manifest.icon ?? './missing', root)
+const iconExt = ICON_TYPES.find((ext) => iconFile.pathname.toLowerCase().endsWith(ext))
+check('icon is an SVG/PNG/JPEG/WebP inside the package', iconExt !== undefined
+  && iconFile.pathname.startsWith(new URL('.', root).pathname))
+check('icon stays inside the size limit dsh-app-boot enforces',
+  statSync(iconFile).size > 0 && statSync(iconFile).size <= MAX_ICON_BYTES)
+check('exports resolve the locale dictionaries app-boot reads',
+  Object.hasOwn(manifest.exports ?? {}, './locale/*.json'))
+check('npm files whitelist ships the icon and the locale dictionaries',
+  manifest.files.includes('icon.svg') && manifest.files.includes('locale/*.json'))
+
+for (const language of ['en', 'zh']) {
+  const meta = readMeta(language)
+  check(`locale/${language}.json carries meta.title and meta.description`, meta.ok)
+}
+// English is the resolver's final fallback, so the two dictionaries must differ.
+check('zh and en display text are distinct',
+  readFileSync(new URL('locale/zh.json', root), 'utf8') !== readFileSync(new URL('locale/en.json', root), 'utf8'))
 
 // ---------------------------------------------------------------- host half
 const host = await import('../lib/index.js')

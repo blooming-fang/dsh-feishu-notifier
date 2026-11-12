@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Feishu Notifier",
+    "description": "Pushes Feishu custom-bot card notifications when the agent asks for approval, waits for your answer, or finishes a turn. Markdown-capable interactive cards, webhook kept as a DSH secret, with a test message you can send in place."
+  }
+}
