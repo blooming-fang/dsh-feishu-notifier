@@ -58,6 +58,36 @@ function templateFor(kind: MessageKind): string {
 }
 
 /**
+ * The slice of the session-title service this plugin reads. It is a structural
+ * type because the service is optional here: `@deepseek-ai/dsh-session-title` is
+ * a separate bundle, and a profile without it must still load this plugin.
+ */
+interface SessionTitleReader {
+  get(session: unknown): { title: string } | undefined
+}
+
+/**
+ * The session's display name — the title DSH shows in its session list.
+ *
+ * Read through `ctx.get` instead of a declared injection so a deployment that
+ * mounts no title service still loads this plugin and simply sends cards
+ * without the name. A title appears only after the service derives it from the
+ * conversation, so early notifications carry none; any read failure degrades to
+ * the unnamed card rather than dropping the notification itself.
+ */
+function sessionTitleOf(ctx: Context, session: unknown): string {
+  if (typeof session !== 'object' || session === null) return ''
+  const titles = ctx.get('sessionTitle') as SessionTitleReader | undefined
+  if (titles === undefined) return ''
+  try {
+    const title = titles.get(session)?.title
+    return typeof title === 'string' ? title.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * Card body: the one-line reason, then the agent's final visible output, so the
  * push carries the answer itself instead of only the fact that the turn ended.
  */
@@ -74,9 +104,19 @@ function bodyFor(detail: string, output: string): string {
  * One interactive-card payload. A custom bot renders Markdown through the
  * card's own `markdown` element (Card JSON 2.0), so the final output keeps its
  * headings, lists, code fences, and links instead of arriving as flat text.
+ *
+ * The session name rides the header `subtitle` rather than the body: the name
+ * belongs to the whole card, it stays visible while scrolling a long answer,
+ * and the body keeps carrying only what happened and what the agent said.
  */
-function cardPayload(title: string, template: string, body: string): Record<string, unknown> {
+function cardPayload(
+  title: string,
+  template: string,
+  body: string,
+  sessionTitle = '',
+): Record<string, unknown> {
   const text = body.trim()
+  const session = sessionTitle.trim()
   return {
     msg_type: 'interactive',
     card: {
@@ -85,6 +125,9 @@ function cardPayload(title: string, template: string, body: string): Record<stri
       header: {
         template,
         title: { tag: 'plain_text', content: title },
+        ...(session === ''
+          ? {}
+          : { subtitle: { tag: 'plain_text', content: `会话：${session}` } }),
       },
       body: {
         direction: 'vertical',
@@ -94,9 +137,17 @@ function cardPayload(title: string, template: string, body: string): Record<stri
   }
 }
 
-/** The card for one notification: kind picks the title and colour, output the excerpt. */
-export function notificationCard(kind: MessageKind, detail: string, output: string): Record<string, unknown> {
-  return cardPayload(titleFor(kind), templateFor(kind), bodyFor(detail, output))
+/**
+ * The card for one notification: kind picks the title and colour, output the
+ * excerpt, and sessionTitle the session name shown under the header.
+ */
+export function notificationCard(
+  kind: MessageKind,
+  detail: string,
+  output: string,
+  sessionTitle = '',
+): Record<string, unknown> {
+  return cardPayload(titleFor(kind), templateFor(kind), bodyFor(detail, output), sessionTitle)
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -224,11 +275,17 @@ async function handleTest(req: IncomingMessage, res: ServerResponse, config: Con
 }
 
 /** Send one notification, reading the live configuration as it fires. */
-function notify(config: Config, kind: MessageKind, detail: string, output = ''): void {
+function notify(
+  config: Config,
+  kind: MessageKind,
+  detail: string,
+  output = '',
+  sessionTitle = '',
+): void {
   if (!config.enabled.get()) return
   const webhook = config.webhook.get().trim()
   if (webhook === '') return
-  void postCard(webhook, notificationCard(kind, detail, output)).catch(error => {
+  void postCard(webhook, notificationCard(kind, detail, output, sessionTitle)).catch(error => {
     console.warn(`[feishu-notifier] notification failed: ${String(error)}`)
   })
 }
@@ -247,7 +304,13 @@ export function apply(ctx: Context, config: Config): void {
   const finalOutput = new Map<string, string>()
 
   ctx.on('approval/request', (request, next) => {
-    notify(config, 'approval', request.reason ?? `工具 ${request.toolName} 正在等待批准。`)
+    notify(
+      config,
+      'approval',
+      request.reason ?? `工具 ${request.toolName} 正在等待批准。`,
+      '',
+      sessionTitleOf(ctx, request.agent?.session),
+    )
     return next()
   })
 
@@ -267,7 +330,13 @@ export function apply(ctx: Context, config: Config): void {
       if (session.header.origin === 'subagent') return
       // 用户主动停止的轮次不发送通知：用户就在 DSH 界面旁，无需再收到飞书消息。
       if (!shouldNotifyTurnEnd(event.data.reason)) return
-      notify(config, 'turn-end', `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`, output)
+      notify(
+        config,
+        'turn-end',
+        `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`,
+        output,
+        sessionTitleOf(ctx, session),
+      )
     }
     // 等待用户决策的记录有两种形态，必须都认，否则会漏通知：
     //   - 普通会话：顶层 `tool/call`，name 就是被调用的工具；
@@ -278,7 +347,7 @@ export function apply(ctx: Context, config: Config): void {
     if (eventType === 'tool/call' || eventType === 'tool/ptc-dispatch-start') {
       const toolName = recordOf(event.data)?.name
       const detail = typeof toolName === 'string' ? DECISION_TOOLS.get(toolName) : undefined
-      if (detail !== undefined) notify(config, 'approval', detail)
+      if (detail !== undefined) notify(config, 'approval', detail, '', sessionTitleOf(ctx, session))
     }
   })
 
