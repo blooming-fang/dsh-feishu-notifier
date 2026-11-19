@@ -146,6 +146,13 @@ check('over-long output is clipped and marked',
   host.notificationCard('turn-end', 'd', 'x'.repeat(5000)).card.body.elements[0].content.includes('已截断'))
 check('a card with nothing to say falls back to its title',
   host.notificationCard('turn-end', '', '').card.body.elements[0].content === 'DSH 对话已结束')
+check('a named card puts the session in the title',
+  host.notificationCard('turn-end', 'd', '', '修复登录接口').card.header.title.content
+  === 'DSH 对话已结束 · 修复登录接口')
+check('an unnamed card keeps the plain title',
+  host.notificationCard('turn-end', 'd', '', '').card.header.title.content === 'DSH 对话已结束')
+check('the session name never adds a second header line',
+  host.notificationCard('turn-end', 'd', '', '修复登录接口').card.header.subtitle === undefined)
 
 check('assistantText joins text blocks in order',
   host.assistantText({ content: [{ type: 'text', text: 'a' }, { type: 'tool-call' }, { type: 'text', text: 'b' }] }) === 'a\nb')
@@ -154,13 +161,16 @@ check('assistantText drops reasoning blocks',
 check('assistantText tolerates malformed messages',
   host.assistantText(undefined) === '' && host.assistantText({ content: 'nope' }) === '')
 
-function stubHostCtx() {
+function stubHostCtx(options = {}) {
   const state = { configured: undefined, routes: [], listeners: {} }
   return {
     state,
     fiber: { stub: true },
     effect: (fn) => { fn(); return () => {} },
     on: (event, handler) => { state.listeners[event] = handler },
+    // Optional service lookup: the notifier reads the session-title service this
+    // way so profiles without it still load the plugin.
+    get: (service) => (service === 'sessionTitle' ? options.titles : undefined),
     settings: { configure: (policy, owner) => { state.configured = { policy, owner }; return () => {} } },
     webServer: { register: (route) => { state.routes.push(route); return () => {} } },
   }
@@ -172,7 +182,12 @@ globalThis.fetch = async (url, init) => {
   return { ok: true, status: 200, text: async () => '{"code":0}' }
 }
 
-const ctx = stubHostCtx()
+const main = { header: { id: 'session-main' } }
+const subagent = { header: { id: 'session-sub', origin: 'subagent' } }
+// Stand-in for @deepseek-ai/dsh-session-title: titles exist only for the main
+// session here, so subagent and unknown sessions exercise the no-name path.
+const titles = { get: (session) => (session === main ? { title: '修复登录接口' } : undefined) }
+const ctx = stubHostCtx({ titles })
 const config = host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' })
 host.apply(ctx, config)
 
@@ -184,9 +199,8 @@ check('apply registers approval/request', typeof ctx.state.listeners['approval/r
 check('apply registers session/event', typeof ctx.state.listeners['session/event'] === 'function')
 
 const emit = ctx.state.listeners['session/event']
-const main = { header: { id: 'session-main' } }
-const subagent = { header: { id: 'session-sub', origin: 'subagent' } }
 const cardTextOf = (message) => (message.body.card.body.elements ?? []).map(e => e.content ?? '').join('\n')
+const titleOf = (message) => message.body.card.header.title.content
 
 emit(main, { type: 'assistant/message', data: { turn: 3, step: 1, message: { role: 'assistant', content: [
   { type: 'reasoning', text: '这段推理不应出现在通知里' },
@@ -199,8 +213,10 @@ check('turn/end card carries the final assistant output',
   cardTextOf(sent[0]).includes('最终答案：**已完成**。'))
 check('turn/end card drops reasoning blocks',
   cardTextOf(sent[0]).includes('这段推理不应出现在通知里') === false)
-check('turn/end card title is the short DSH copy',
-  sent[0].body.card.header.title.content === 'DSH 对话已结束')
+check('turn/end card title names its session',
+  titleOf(sent[0]) === 'DSH 对话已结束 · 修复登录接口')
+check('session name rides the card title, not the body',
+  cardTextOf(sent[0]).includes('修复登录接口') === false)
 
 emit(main, { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } })
 await tick()
@@ -222,10 +238,14 @@ await tick()
 check('parent-cancelled turn/end notifies without inheriting a stopped turn',
   sent.length === 3 && cardTextOf(sent[2]).includes('第 6 轮：已中止：父代理取消')
   && cardTextOf(sent[2]).includes('被放弃的输出') === false)
+check('every main-session card keeps naming the session',
+  titleOf(sent[2]) === 'DSH 对话已结束 · 修复登录接口')
 
 emit(main, { type: 'tool/call', data: { name: 'ask_user_question' } })
 await tick()
 check('ask_user_question notifies', sent.length === 4 && cardTextOf(sent[3]).includes('回答问题'))
+check('decision-request card names its session',
+  titleOf(sent[3]) === 'DSH 需要你的操作 · 修复登录接口')
 
 emit(main, { type: 'tool/call', data: { name: 'exit_plan_mode' } })
 await tick()
@@ -235,10 +255,12 @@ emit(main, { type: 'tool/call', data: { name: 'read' } })
 await tick()
 check('unrelated tool/call is ignored', sent.length === 5)
 
-const outcome = await ctx.state.listeners['approval/request']({ toolName: 'pwsh' }, async () => 'allowed-once')
+const outcome = await ctx.state.listeners['approval/request']({ toolName: 'pwsh', agent: { session: main } }, async () => 'allowed-once')
 await tick()
 check('approval waterfall still delegates to next()', outcome === 'allowed-once')
 check('approval/request notifies with tool name', sent.length === 6 && cardTextOf(sent[5]).includes('pwsh'))
+check('approval/request reads the name from the requesting agent session',
+  titleOf(sent[5]) === 'DSH 需要你的操作 · 修复登录接口')
 
 // A PTC session records nested tool calls as tool/ptc-dispatch-start (its top-level
 // tool/call is always run_code), so the decision branch must read both event types.
@@ -270,7 +292,8 @@ check('POST test route sends a card', okRes.status === 200 && JSON.parse(okRes.b
   && sent.length === beforeRoute + 1
   && sent[beforeRoute].body.msg_type === 'interactive'
   && sent[beforeRoute].body.card.schema === '2.0'
-  && sent[beforeRoute].body.card.body.elements[0].content.includes('测试消息'))
+  && sent[beforeRoute].body.card.body.elements[0].content.includes('测试消息')
+  && sent[beforeRoute].body.card.header.title.content === 'DSH 飞书通知测试')
 const getRes = await callRoute('GET')
 check('GET test route is 405', getRes.status === 405)
 const afterRoute = sent.length
@@ -289,6 +312,23 @@ host.apply(emptyCtx, host.Config({ enabled: true, webhook: '' }))
 emptyCtx.state.listeners['session/event']({ header: {} }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
 await tick()
 check('unconfigured webhook sends nothing', sent.length === afterRoute)
+
+// A profile that mounts no session-title service must still load and notify —
+// the name is an enhancement, never a precondition.
+const untitledCtx = stubHostCtx()
+host.apply(untitledCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
+untitledCtx.state.listeners['session/event']({ header: { id: 'session-untitled' } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+await tick()
+check('a deployment without the title service still notifies, just anonymously',
+  sent.length === afterRoute + 1 && titleOf(sent.at(-1)) === 'DSH 对话已结束')
+
+// A title service that throws on an alien session must not lose the push.
+const brokenTitlesCtx = stubHostCtx({ titles: { get: () => { throw new Error('no such session') } } })
+host.apply(brokenTitlesCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
+brokenTitlesCtx.state.listeners['session/event']({ header: { id: 'session-broken' } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+await tick()
+check('a failing title read degrades to an unnamed card instead of dropping the push',
+  sent.length === afterRoute + 2 && titleOf(sent.at(-1)) === 'DSH 对话已结束')
 
 // -------------------------------------------------------------- client half
 let module
