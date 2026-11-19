@@ -47,9 +47,16 @@ const DECISION_TOOLS = new Map<string, string>([
   ['exit_plan_mode', '智能体正在等待你确认计划。'],
 ])
 
-/** Card title — the push preview line, so it stays short and reads "DSH". */
-function titleFor(kind: MessageKind): string {
-  return kind === 'approval' ? 'DSH 需要你的操作' : 'DSH 对话已结束'
+/**
+ * Card title — the push preview line, so it leads with the short "DSH" phrase
+ * and then names the session. Feishu's push preview shows only the card title,
+ * never the body, so the session name belongs here rather than in the body: a
+ * lock-screen notification then says which conversation needs attention.
+ */
+function titleFor(kind: MessageKind, sessionTitle = ''): string {
+  const label = kind === 'approval' ? 'DSH 需要你的操作' : 'DSH 对话已结束'
+  const session = sessionTitle.trim()
+  return session === '' ? label : `${label} · ${session}`
 }
 
 /** Card header colour, so an approval is visually distinct from a turn end. */
@@ -105,18 +112,12 @@ function bodyFor(detail: string, output: string): string {
  * card's own `markdown` element (Card JSON 2.0), so the final output keeps its
  * headings, lists, code fences, and links instead of arriving as flat text.
  *
- * The session name rides the header `subtitle` rather than the body: the name
- * belongs to the whole card, it stays visible while scrolling a long answer,
- * and the body keeps carrying only what happened and what the agent said.
+ * The header carries exactly one title line (the session name is part of it),
+ * so the card never reads as two competing headings, and the body keeps
+ * carrying only what happened and what the agent said.
  */
-function cardPayload(
-  title: string,
-  template: string,
-  body: string,
-  sessionTitle = '',
-): Record<string, unknown> {
+function cardPayload(title: string, template: string, body: string): Record<string, unknown> {
   const text = body.trim()
-  const session = sessionTitle.trim()
   return {
     msg_type: 'interactive',
     card: {
@@ -125,9 +126,6 @@ function cardPayload(
       header: {
         template,
         title: { tag: 'plain_text', content: title },
-        ...(session === ''
-          ? {}
-          : { subtitle: { tag: 'plain_text', content: `会话：${session}` } }),
       },
       body: {
         direction: 'vertical',
@@ -139,7 +137,7 @@ function cardPayload(
 
 /**
  * The card for one notification: kind picks the title and colour, output the
- * excerpt, and sessionTitle the session name shown under the header.
+ * excerpt, and sessionTitle names the session in the title.
  */
 export function notificationCard(
   kind: MessageKind,
@@ -147,7 +145,7 @@ export function notificationCard(
   output: string,
   sessionTitle = '',
 ): Record<string, unknown> {
-  return cardPayload(titleFor(kind), templateFor(kind), bodyFor(detail, output), sessionTitle)
+  return cardPayload(titleFor(kind, sessionTitle), templateFor(kind), bodyFor(detail, output))
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
