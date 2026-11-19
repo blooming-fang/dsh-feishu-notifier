@@ -167,6 +167,21 @@ export function turnReasonText(reason: unknown): string {
   }
 }
 
+/**
+ * 会话标题由 session-title 服务以 `session/title` 事件写进会话日志，这里取最新一条。
+ * 桩上下文或尚无标题的会话返回 `undefined`，通知文本退回不带标题的形态。
+ */
+function sessionTitleOf(session: { snapshotEvents?(): readonly unknown[] }): string | undefined {
+  const events = session.snapshotEvents?.() ?? []
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i] as { type?: string; data?: { title?: unknown } }
+    if (event.type !== 'session/title') continue
+    const title = event.data?.title
+    return typeof title === 'string' ? title.trim() : undefined
+  }
+  return undefined
+}
+
 function writeJson(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(value))
@@ -267,7 +282,10 @@ export function apply(ctx: Context, config: Config): void {
       if (session.header.origin === 'subagent') return
       // 用户主动停止的轮次不发送通知：用户就在 DSH 界面旁，无需再收到飞书消息。
       if (!shouldNotifyTurnEnd(event.data.reason)) return
-      notify(config, 'turn-end', `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`, output)
+      // 多个会话并行时，轮次号与原因不足以辨认是哪个会话结束，标题补上这一层。
+      const title = sessionTitleOf(session)
+      const detail = `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`
+      notify(config, 'turn-end', title === undefined ? detail : `会话标题：${title}\n${detail}`, output)
     }
     // 等待用户决策的记录有两种形态，必须都认，否则会漏通知：
     //   - 普通会话：顶层 `tool/call`，name 就是被调用的工具；
