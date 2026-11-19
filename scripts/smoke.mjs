@@ -142,8 +142,36 @@ check('approval card title uses the short DSH copy',
   host.notificationCard('approval', '工具 pwsh 正在等待批准。', '').card.header.title.content === 'DSH 需要你的操作')
 check('no card copy mentions DeepSeek Harness',
   JSON.stringify(completedCard).includes('DeepSeek Harness') === false)
-check('over-long output is clipped and marked',
-  host.notificationCard('turn-end', 'd', 'x'.repeat(5000)).card.body.elements[0].content.includes('已截断'))
+// Long output is paginated, not truncated: each card stays inside the body
+// budget, cuts fall on line boundaries, and the cards together carry the whole
+// answer in order.
+const longLines = Array.from({ length: 400 }, (_, index) => `第 ${index + 1} 行：${'内容'.repeat(10)}`)
+const longText = longLines.join('\n')
+const longParts = host.splitOutput(longText)
+check('long output splits into several card-sized parts', longParts.length >= 2)
+check('every part stays within the per-card ceiling', longParts.every(part => part.length <= 3000))
+check('the parts together carry the whole answer', longParts.join('\n') === longText)
+check('cuts fall on line boundaries', longParts.slice(1).every(part => longLines.includes(part.split('\n')[0])))
+
+const oneLine = 'x'.repeat(8000)
+const oneLineParts = host.splitOutput(oneLine)
+check('a single over-long line is cut without losing text',
+  oneLineParts.join('') === oneLine && oneLineParts.every(part => part.length <= 3000))
+
+const emojiText = `a${'😀'.repeat(4000)}`
+const emojiParts = host.splitOutput(emojiText)
+check('a cut never splits a surrogate pair',
+  emojiParts.join('') === emojiText && emojiParts.every(part => part.length <= 3000))
+
+const fencedText = `开头\n\`\`\`js\n${'const value = 1\n'.repeat(400)}\`\`\`\n结尾`
+const fencedParts = host.splitOutput(fencedText)
+const fenceLines = (part) => (part.match(/^`{3,}/gm) ?? []).length
+check('a fenced code block is closed and reopened across the cut',
+  fencedParts.length >= 2
+  && fencedParts.every(part => fenceLines(part) % 2 === 0)
+  && fencedParts[1].startsWith('```js'))
+check('fence handling keeps the whole fenced content',
+  fencedParts.join('\n').includes('const value = 1') && fencedParts.join('\n').includes('结尾'))
 check('a card with nothing to say falls back to its title',
   host.notificationCard('turn-end', '', '').card.body.elements[0].content === 'DSH 对话已结束')
 check('a named card puts the session in the title',
@@ -329,6 +357,30 @@ brokenTitlesCtx.state.listeners['session/event']({ header: { id: 'session-broken
 await tick()
 check('a failing title read degrades to an unnamed card instead of dropping the push',
   sent.length === afterRoute + 2 && titleOf(sent.at(-1)) === 'DSH 对话已结束')
+
+// Pagination end-to-end: one long turn-end sends consecutive cards, each
+// numbered, and together they reproduce the answer once.
+const paginatedCtx = stubHostCtx({ titles })
+host.apply(paginatedCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
+const beforePaginate = sent.length
+const longAnswer = Array.from({ length: 300 }, (_, index) => `第 ${index + 1} 行：${'答案'.repeat(20)}`).join('\n')
+const expectedParts = host.splitOutput(longAnswer)
+paginatedCtx.state.listeners['session/event'](main, {
+  type: 'assistant/message',
+  data: { turn: 9, step: 1, message: { content: [{ type: 'text', text: longAnswer }] } },
+})
+paginatedCtx.state.listeners['session/event'](main, { type: 'turn/end', data: { turn: 9, reason: { kind: 'completed' } } })
+await new Promise(resolve => setTimeout(resolve, 20))
+const paginatedCards = sent.slice(beforePaginate)
+check('one long turn-end becomes several consecutive cards',
+  paginatedCards.length === expectedParts.length && expectedParts.length >= 2)
+check('each card title is numbered and keeps the session name',
+  paginatedCards.every((card, index) =>
+    titleOf(card) === `DSH 对话已结束（${index + 1}/${expectedParts.length}） · 修复登录接口`))
+const rejoined = paginatedCards
+  .map((card, index) => cardTextOf(card).replace(index === 0 ? '第 9 轮：正常完成\n\n' : '', ''))
+  .join('\n')
+check('the cards together carry the whole answer once', rejoined === longAnswer)
 
 // -------------------------------------------------------------- client half
 let module

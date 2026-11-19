@@ -32,11 +32,12 @@ const TEST_PATH = '/api/feishu-notifier/test'
 type MessageKind = 'approval' | 'turn-end'
 
 /**
- * Ceiling on the final output carried by one notification. A card body is a
- * push notification, not a transcript: past this length the excerpt is cut and
- * marked, so the message stays inside the webhook's payload budget.
+ * Ceiling on the Markdown text one card carries. A longer answer is not cut
+ * short: the notification continues in further cards of at most this size, so
+ * the whole answer arrives while each webhook call stays inside the payload
+ * budget.
  */
-const MAX_OUTPUT_CHARS = 3000
+const MAX_PART_CHARS = 3000
 
 /**
  * Tools whose invocation means the agent is blocked on a human decision, mapped
@@ -53,10 +54,19 @@ const DECISION_TOOLS = new Map<string, string>([
  * never the body, so the session name belongs here rather than in the body: a
  * lock-screen notification then says which conversation needs attention.
  */
-function titleFor(kind: MessageKind, sessionTitle = ''): string {
+function titleFor(
+  kind: MessageKind,
+  sessionTitle = '',
+  part?: { index: number; total: number },
+): string {
   const label = kind === 'approval' ? 'DSH 需要你的操作' : 'DSH 对话已结束'
+  // A paginated answer marks each card so the push preview shows which piece it
+  // is; a single card keeps the plain phrase.
+  const sequence = part === undefined || part.total <= 1
+    ? label
+    : `${label}（${part.index}/${part.total}）`
   const session = sessionTitle.trim()
-  return session === '' ? label : `${label} · ${session}`
+  return session === '' ? sequence : `${sequence} · ${session}`
 }
 
 /** Card header colour, so an approval is visually distinct from a turn end. */
@@ -95,16 +105,95 @@ function sessionTitleOf(ctx: Context, session: unknown): string {
 }
 
 /**
- * Card body: the one-line reason, then the agent's final visible output, so the
- * push carries the answer itself instead of only the fact that the turn ended.
+ * Card body: the one-line reason, then the agent's final visible output (or
+ * its first card-sized part), so the push carries the answer itself instead of
+ * only the fact that the turn ended.
  */
 function bodyFor(detail: string, output: string): string {
-  const text = output.trim()
-  if (text === '') return detail
-  const excerpt = text.length > MAX_OUTPUT_CHARS
-    ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n\n…（输出过长，已截断）`
-    : text
-  return `${detail}\n\n${excerpt}`
+  return output === '' ? detail : `${detail}\n\n${output}`
+}
+
+/** An open fenced code block, carried from one card to the next. */
+interface FenceState {
+  /** The opening fence line, reused to reopen the block in the next card. */
+  readonly line: string
+  /** The opening marker run (` ``` ` or `~~~`), used to close the block. */
+  readonly marker: string
+}
+
+const FENCE_LINE = /^\s{0,3}(`{3,}|~{3,})(.*)$/
+
+/**
+ * The fenced code block still open at the end of this text, when one is. It
+ * lets a card boundary fall inside code without breaking its rendering: the
+ * card that ends in the block closes it, and the next card reopens it.
+ */
+function fenceAfter(text: string): FenceState | undefined {
+  let open: FenceState | undefined
+  for (const line of text.split('\n')) {
+    const match = FENCE_LINE.exec(line)
+    if (match === null) continue
+    const run = match[1]
+    if (open === undefined) {
+      open = { line, marker: run }
+      continue
+    }
+    // Only a bare run of the same character closes the block.
+    if (run[0] === open.marker[0] && run.length >= open.marker.length && match[2].trim() === '') {
+      open = undefined
+    }
+  }
+  return open
+}
+
+/** Cut boundary for a line longer than the ceiling, never inside a surrogate pair. */
+function safeCut(text: string, max: number): number {
+  const code = text.charCodeAt(max - 1)
+  return code >= 0xD800 && code <= 0xDBFF ? max - 1 : max
+}
+
+/**
+ * Split the visible output into card-sized parts.
+ *
+ * Cuts prefer line boundaries and cut a line only when it alone exceeds the
+ * ceiling. A cut that lands inside a fenced code block closes the fence on the
+ * card that ends there and reopens it on the next card, so code keeps rendering
+ * as code instead of leaking into prose. Parts are consecutive: sending them in
+ * order reproduces the answer across the chat.
+ */
+export function splitOutput(text: string, max = MAX_PART_CHARS): string[] {
+  if (text.length <= max) return [text]
+
+  const chunks: string[] = []
+  let rest = text
+  while (rest.length > max) {
+    const lineBreak = rest.lastIndexOf('\n', max)
+    if (lineBreak > 0) {
+      chunks.push(rest.slice(0, lineBreak))
+      rest = rest.slice(lineBreak + 1)
+      continue
+    }
+    const cut = safeCut(rest, max)
+    chunks.push(rest.slice(0, cut))
+    rest = rest.slice(cut)
+  }
+  // The final chunk is empty when the cut landed on a trailing newline.
+  if (rest !== '') chunks.push(rest)
+
+  const parts: string[] = []
+  let fence: FenceState | undefined
+  for (const chunk of chunks) {
+    const body = fence === undefined ? chunk : `${fence.line}\n${chunk}`
+    const open = fenceAfter(body)
+    if (open === undefined) {
+      parts.push(body)
+      fence = undefined
+    } else {
+      parts.push(`${body}\n${open.marker}`)
+      fence = open
+    }
+  }
+  return parts
 }
 
 /**
@@ -117,7 +206,6 @@ function bodyFor(detail: string, output: string): string {
  * carrying only what happened and what the agent said.
  */
 function cardPayload(title: string, template: string, body: string): Record<string, unknown> {
-  const text = body.trim()
   return {
     msg_type: 'interactive',
     card: {
@@ -129,7 +217,9 @@ function cardPayload(title: string, template: string, body: string): Record<stri
       },
       body: {
         direction: 'vertical',
-        elements: [{ tag: 'markdown', content: text === '' ? title : text, text_align: 'left' }],
+        // Keep the body verbatim: leading spaces and blank lines belong to
+        // indented code and fenced blocks carried across cards.
+        elements: [{ tag: 'markdown', content: body.trim() === '' ? title : body, text_align: 'left' }],
       },
     },
   }
@@ -137,7 +227,8 @@ function cardPayload(title: string, template: string, body: string): Record<stri
 
 /**
  * The card for one notification: kind picks the title and colour, output the
- * excerpt, and sessionTitle names the session in the title.
+ * body text, and sessionTitle names the session in the title. This builds a
+ * single card; `notify` paginates longer output through `splitOutput`.
  */
 export function notificationCard(
   kind: MessageKind,
@@ -272,7 +363,11 @@ async function handleTest(req: IncomingMessage, res: ServerResponse, config: Con
   }
 }
 
-/** Send one notification, reading the live configuration as it fires. */
+/**
+ * Send one notification, reading the live configuration as it fires. Output
+ * longer than one card is paginated: the cards go out one after another, in
+ * order, so the answer arrives complete across several messages.
+ */
 function notify(
   config: Config,
   kind: MessageKind,
@@ -283,7 +378,22 @@ function notify(
   if (!config.enabled.get()) return
   const webhook = config.webhook.get().trim()
   if (webhook === '') return
-  void postCard(webhook, notificationCard(kind, detail, output, sessionTitle)).catch(error => {
+  const parts = splitOutput(output.trim())
+  const total = parts.length
+  const send = async (): Promise<void> => {
+    for (const [index, part] of parts.entries()) {
+      // Only the first card carries the turn line; later cards continue the
+      // answer, marked by the part counter in the title.
+      const body = index === 0 ? bodyFor(detail, part) : part
+      const title = titleFor(kind, sessionTitle, total > 1 ? { index: index + 1, total } : undefined)
+      try {
+        await postCard(webhook, cardPayload(title, templateFor(kind), body))
+      } catch (error) {
+        throw new Error(`第 ${String(index + 1)}/${String(total)} 条通知发送失败：${String(error)}`)
+      }
+    }
+  }
+  void send().catch(error => {
     console.warn(`[feishu-notifier] notification failed: ${String(error)}`)
   })
 }
