@@ -40,6 +40,31 @@ type MessageKind = 'approval' | 'turn-end'
 const MAX_PART_CHARS = 3000
 
 /**
+ * Feishu's frequency limits for one custom-bot webhook: 5 messages/second to
+ * the same group and 100 messages/minute per bot. Consecutive cards are spaced
+ * below both: 300 ms is about 3.3 messages/second. A batch of at most
+ * {@link MESSAGES_PER_MINUTE_BUDGET} cards finishes well inside one minute and
+ * cannot exceed the minute budget, so only longer batches need the slower pace,
+ * which keeps them at about 90 messages/minute with headroom to spare.
+ */
+const PART_INTERVAL_MS = 300
+const MESSAGES_PER_MINUTE_BUDGET = 90
+const LONG_BATCH_INTERVAL_MS = 670
+
+/**
+ * Delay between two cards of a batch of `total` cards. Below the minute budget
+ * the base pace is enough; above it the batch spreads over more than a minute so
+ * no rolling minute exceeds the budget.
+ */
+export function sendIntervalFor(total: number): number {
+  return total <= MESSAGES_PER_MINUTE_BUDGET ? PART_INTERVAL_MS : LONG_BATCH_INTERVAL_MS
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
  * Tools whose invocation means the agent is blocked on a human decision, mapped
  * to the line the card carries.
  */
@@ -366,7 +391,8 @@ async function handleTest(req: IncomingMessage, res: ServerResponse, config: Con
 /**
  * Send one notification, reading the live configuration as it fires. Output
  * longer than one card is paginated: the cards go out one after another, in
- * order, so the answer arrives complete across several messages.
+ * order and paced by `sendIntervalFor`, so the answer arrives complete across
+ * several messages without reaching Feishu's frequency limits.
  */
 function notify(
   config: Config,
@@ -380,6 +406,7 @@ function notify(
   if (webhook === '') return
   const parts = splitOutput(output.trim())
   const total = parts.length
+  const interval = sendIntervalFor(total)
   const send = async (): Promise<void> => {
     for (const [index, part] of parts.entries()) {
       // Only the first card carries the turn line; later cards continue the
@@ -391,6 +418,7 @@ function notify(
       } catch (error) {
         throw new Error(`第 ${String(index + 1)}/${String(total)} 条通知发送失败：${String(error)}`)
       }
+      if (index < total - 1) await delay(interval)
     }
   }
   void send().catch(error => {

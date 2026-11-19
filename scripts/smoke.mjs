@@ -358,22 +358,38 @@ await tick()
 check('a failing title read degrades to an unnamed card instead of dropping the push',
   sent.length === afterRoute + 2 && titleOf(sent.at(-1)) === 'DSH 对话已结束')
 
+// The card pace follows Feishu's limits: 300 ms between cards while a batch
+// stays inside the minute budget, and a slower pace above it so a long batch
+// never reaches 100 messages/minute.
+check('a short batch is paced at 300 ms per card',
+  host.sendIntervalFor(1) === 300 && host.sendIntervalFor(90) === 300)
+check('a long batch is slowed below 100 messages/minute',
+  host.sendIntervalFor(91) === 670 && host.sendIntervalFor(500) === 670)
+
 // Pagination end-to-end: one long turn-end sends consecutive cards, each
-// numbered, and together they reproduce the answer once.
+// numbered, spaced by that interval, and together they reproduce the answer.
 const paginatedCtx = stubHostCtx({ titles })
 host.apply(paginatedCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
 const beforePaginate = sent.length
 const longAnswer = Array.from({ length: 300 }, (_, index) => `第 ${index + 1} 行：${'答案'.repeat(20)}`).join('\n')
 const expectedParts = host.splitOutput(longAnswer)
+const startedAt = Date.now()
 paginatedCtx.state.listeners['session/event'](main, {
   type: 'assistant/message',
   data: { turn: 9, step: 1, message: { content: [{ type: 'text', text: longAnswer }] } },
 })
 paginatedCtx.state.listeners['session/event'](main, { type: 'turn/end', data: { turn: 9, reason: { kind: 'completed' } } })
-await new Promise(resolve => setTimeout(resolve, 20))
+let waited = 0
+while (sent.length - beforePaginate < expectedParts.length && waited < 10000) {
+  await new Promise(resolve => setTimeout(resolve, 10))
+  waited += 10
+}
+const elapsed = Date.now() - startedAt
 const paginatedCards = sent.slice(beforePaginate)
 check('one long turn-end becomes several consecutive cards',
   paginatedCards.length === expectedParts.length && expectedParts.length >= 2)
+check('cards are spaced by the paced interval',
+  elapsed >= (expectedParts.length - 1) * 300 - 50)
 check('each card title is numbered and keeps the session name',
   paginatedCards.every((card, index) =>
     titleOf(card) === `DSH 对话已结束（${index + 1}/${expectedParts.length}） · 修复登录接口`))
