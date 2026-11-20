@@ -185,8 +185,11 @@ check('an absolute image address is kept as written',
   host.degradeImages('![预览](E:/shots/a.png)', 'J:/work') === '[图片：预览]（`E:/shots/a.png`）')
 check('an image without alt text becomes [图片] with its address',
   host.degradeImages('![](x.png)') === '[图片]（`x.png`）')
-check('a remote image URL is degraded to text with the URL',
-  host.degradeImages('![预览](https://example.com/a.png)') === '[图片：预览]（https://example.com/a.png）')
+check('a remote image URL becomes a plain link',
+  host.degradeImages('![预览](https://example.com/a.png)') === '[图片：预览](https://example.com/a.png)')
+check('a local image becomes a link through the image route',
+  host.degradeImages('![预览](.tmp/a.png)', '', () => 'http://127.0.0.1:12345/api/feishu-notifier/image?id=x')
+  === '[图片：预览](http://127.0.0.1:12345/api/feishu-notifier/image?id=x)')
 check('an uploaded Feishu image key is kept',
   host.degradeImages('![预览](img_v3_0238_abc-def)') === '![预览](img_v3_0238_abc-def)')
 check('reference-style images degrade',
@@ -227,7 +230,10 @@ function stubHostCtx(options = {}) {
     // way so profiles without it still load the plugin.
     get: (service) => (service === 'sessionTitle' ? options.titles : undefined),
     settings: { configure: (policy, owner) => { state.configured = { policy, owner }; return () => {} } },
-    webServer: { register: (route) => { state.routes.push(route); return () => {} } },
+    webServer: {
+      register: (route) => { state.routes.push(route); return () => {} },
+      getOrigin: () => options.origin ?? 'http://127.0.0.1:12345',
+    },
   }
 }
 
@@ -248,8 +254,10 @@ host.apply(ctx, config)
 
 check('apply configures settings page policy auto:false', ctx.state.configured?.policy?.auto === false)
 check('apply binds the policy to this fiber', ctx.state.configured?.owner === ctx.fiber)
-check('apply registers the exact test route', ctx.state.routes.length === 1
-  && ctx.state.routes[0].kind === 'exact' && ctx.state.routes[0].path === '/api/feishu-notifier/test')
+check('apply registers the exact test route', ctx.state.routes.some(route =>
+  route.kind === 'exact' && route.path === '/api/feishu-notifier/test'))
+check('apply registers the local image route', ctx.state.routes.some(route =>
+  route.kind === 'exact' && route.path === '/api/feishu-notifier/image'))
 check('apply registers approval/request', typeof ctx.state.listeners['approval/request'] === 'function')
 check('apply registers session/event', typeof ctx.state.listeners['session/event'] === 'function')
 
@@ -336,9 +344,10 @@ await tick()
 check('ordinary nested tools and PTC completion stay silent', sent.length === 8)
 
 // test route
-const callRoute = async (method, cfg) => {
+const testRoute = ctx.state.routes.find(route => route.path === '/api/feishu-notifier/test')
+const callRoute = async (method) => {
   const res = { status: undefined, body: '', writeHead(s) { this.status = s }, end(b) { this.body = b ?? '' } }
-  await ctx.state.routes[0].handler({ method }, res)
+  await testRoute.handler({ method }, res)
   return res
 }
 const beforeRoute = sent.length
@@ -359,7 +368,8 @@ disabledCtx.state.listeners['session/event']({ header: {} }, { type: 'turn/end',
 await tick()
 check('disabled plugin sends nothing', sent.length === afterRoute)
 const disabledRes = { status: undefined, body: '', writeHead(s) { this.status = s }, end(b) { this.body = b ?? '' } }
-await disabledCtx.state.routes[0].handler({ method: 'POST' }, disabledRes)
+await disabledCtx.state.routes.find(route => route.path === '/api/feishu-notifier/test')
+  .handler({ method: 'POST' }, disabledRes)
 check('disabled plugin test route is 409', disabledRes.status === 409)
 
 const emptyCtx = stubHostCtx()
@@ -426,36 +436,28 @@ const rejoined = paginatedCards
 check('the cards together carry the whole answer once', rejoined === longAnswer)
 
 // A real turn whose answer shows a local screenshot must still be delivered:
-// the image is degraded, not left in the card for Feishu to reject.
+// the image becomes a link through the plugin's local image route, and the
+// route must actually serve the file the relative path resolved to.
 const imageCtx = stubHostCtx({ titles })
 host.apply(imageCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
 const beforeImage = sent.length
-imageCtx.state.listeners['session/event'](main, {
+const imageSession = { header: { id: 'session-image', cwd: process.cwd() } }
+imageCtx.state.listeners['session/event'](imageSession, {
   type: 'assistant/message',
-  data: { turn: 10, step: 1, message: { content: [{ type: 'text', text: '看渲染：![预览](.tmp/preview.png) 已完成。' }] } },
+  data: { turn: 10, step: 1, message: { content: [{ type: 'text', text: '看渲染：![预览](docs/images/1.png) 已完成。' }] } },
 })
-imageCtx.state.listeners['session/event'](main, { type: 'turn/end', data: { turn: 10, reason: { kind: 'completed' } } })
+imageCtx.state.listeners['session/event'](imageSession, { type: 'turn/end', data: { turn: 10, reason: { kind: 'completed' } } })
 await tick()
 check('a turn-end answer with a local image is still delivered', sent.length === beforeImage + 1)
 const imageCardText = cardTextOf(sent.at(-1))
-check('the delivered card carries plain text instead of the image',
-  imageCardText.includes('[图片：预览]') && imageCardText.includes('![') === false)
-
-// The address comes from the session's working directory, so a relative path
-// in the answer becomes a location the reader can actually open.
-const cwdCtx = stubHostCtx({ titles })
-host.apply(cwdCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
-const beforeCwd = sent.length
-const cwdSession = { header: { id: 'session-cwd', cwd: 'J:/work' } }
-cwdCtx.state.listeners['session/event'](cwdSession, {
-  type: 'assistant/message',
-  data: { turn: 11, step: 1, message: { content: [{ type: 'text', text: '看图 ![预览](.tmp/a.png)' }] } },
-})
-cwdCtx.state.listeners['session/event'](cwdSession, { type: 'turn/end', data: { turn: 11, reason: { kind: 'completed' } } })
-await tick()
-check('a delivered card resolves the image address against the session cwd',
-  sent.length === beforeCwd + 1
-  && cardTextOf(sent.at(-1)).includes(resolvePath('J:/work', '.tmp/a.png')))
+const imageLink = /\[图片：预览\]\((http:\/\/127\.0\.0\.1:12345\/api\/feishu-notifier\/image\?id=([0-9a-f-]+))\)/.exec(imageCardText)
+check('the card links the local image through the plugin route',
+  imageLink !== null && imageCardText.includes('![') === false)
+const imageRoute = imageCtx.state.routes.find(route => route.path === '/api/feishu-notifier/image')
+const imageHead = { status: undefined, headers: {}, writeHead(status, headers) { this.status = status; this.headers = headers }, end() {} }
+await imageRoute.handler({ method: 'HEAD', url: `/api/feishu-notifier/image?id=${imageLink?.[2] ?? ''}` }, imageHead)
+check('the local image route serves the referenced image',
+  imageHead.status === 200 && imageHead.headers['content-type'] === 'image/png')
 
 // -------------------------------------------------------------- client half
 let module
