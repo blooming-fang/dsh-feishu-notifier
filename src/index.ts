@@ -1,8 +1,6 @@
-import { randomUUID } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { extname, isAbsolute, resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -202,118 +200,6 @@ const IMAGE_REFERENCE = /!\[([^\]]*)\]\[([^\]]*)\]/g
 const INLINE_CODE = /(`+[^`]*`+)/g
 const URL_LIKE = /^(?:https?|data|file):/i
 
-/** Route that serves one referenced local image to the local browser. */
-export const IMAGE_PATH = '/api/feishu-notifier/image'
-
-const IMAGE_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.bmp': 'image/bmp',
-  '.svg': 'image/svg+xml',
-  '.avif': 'image/avif',
-}
-
-/** Turns a local image path into a clickable URL served by this plugin. */
-export type ImageLinker = (path: string) => string | undefined
-
-/**
- * Root URL of the web server, when this DSH version exposes one. Read
- * defensively because older 0.2.x releases may predate `getOrigin`; without it
- * the card falls back to the plain file address.
- */
-function originOf(server: unknown): string | undefined {
-  const getOrigin = (server as { getOrigin?: () => string }).getOrigin
-  if (typeof getOrigin !== 'function') return undefined
-  try {
-    return getOrigin.call(server)
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Register the local image route and return the link builder used in cards.
- * The route maps an unguessable id to the exact path a notification
- * referenced, only serves image files, and keeps a bounded registry, so it
- * never becomes a general file server.
- */
-export function registerImageLinks(ctx: Context): { linkFor: ImageLinker } {
-  const byId = new Map<string, string>()
-  const limit = 500
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: IMAGE_PATH,
-    handler: (req, res) => serveImage(req, res, byId),
-  }), 'feishu-notifier: image route')
-  return {
-    linkFor(path) {
-      // Before the listener binds there is no origin; the card falls back to
-      // the plain address.
-      const origin = originOf(ctx.webServer)
-      if (origin === undefined) return undefined
-      const id = randomUUID()
-      byId.set(id, path)
-      if (byId.size > limit) {
-        const oldest = byId.keys().next().value
-        if (oldest !== undefined) byId.delete(oldest)
-      }
-      return `${origin}${IMAGE_PATH}?id=${id}`
-    },
-  }
-}
-
-/** Serve one registered image path, or 404 for anything else. */
-async function serveImage(
-  req: IncomingMessage,
-  res: ServerResponse,
-  byId: ReadonlyMap<string, string>,
-): Promise<void> {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405, { allow: 'GET, HEAD' })
-    res.end()
-    return
-  }
-  const id = new URL(req.url ?? '/', 'http://localhost').searchParams.get('id') ?? ''
-  const file = byId.get(id)
-  if (file === undefined) {
-    res.writeHead(404)
-    res.end()
-    return
-  }
-  const type = IMAGE_TYPES[extname(file).toLowerCase()]
-  if (type === undefined) {
-    res.writeHead(404)
-    res.end()
-    return
-  }
-  try {
-    const info = await stat(file)
-    if (!info.isFile()) {
-      res.writeHead(404)
-      res.end()
-      return
-    }
-    res.writeHead(200, {
-      'content-type': type,
-      'content-length': info.size,
-      'cache-control': 'private, max-age=300',
-    })
-    if (req.method === 'HEAD') {
-      res.end()
-      return
-    }
-    const stream = createReadStream(file)
-    stream.on('error', () => { res.destroy() })
-    stream.pipe(res)
-  } catch {
-    res.writeHead(404)
-    res.end()
-  }
-}
-
 /** Plain-text stand-in for one image that cannot be delivered. */
 function imageLabel(alt: string): string {
   const text = alt.trim()
@@ -321,9 +207,9 @@ function imageLabel(alt: string): string {
 }
 
 /**
- * The address printed for one image. A relative path is resolved against the
- * session's working directory, so the notification names a location the reader
- * can actually find; URLs and absolute paths are kept as written.
+ * The local address of one image. A relative path is resolved against the
+ * session's working directory, so the link names a real location; URLs and
+ * absolute paths are kept as written.
  */
 function imageAddress(target: string, baseDir: string): string {
   if (baseDir !== '' && !isAbsolute(target) && !URL_LIKE.test(target)) {
@@ -333,11 +219,27 @@ function imageAddress(target: string, baseDir: string): string {
 }
 
 /**
- * Degrade the image syntax on one line, leaving inline code spans untouched.
- * A local path becomes a clickable link when a link builder is available, and
- * otherwise falls back to inline code so backslashes stay literal.
+ * One clickable link for an image. A local path becomes the `file:` URL a
+ * browser opens directly, so the notification can point at the picture without
+ * uploading anything; an ordinary URL is linked as it is, and a `data:` URI is
+ * only labelled because linking it would bloat the card.
  */
-function degradeInlineImages(line: string, baseDir: string, linkFor?: ImageLinker): string {
+function imageLink(target: string, baseDir: string): string | undefined {
+  if (/^https?:/i.test(target) || /^file:/i.test(target)) return target
+  if (/^data:/i.test(target)) return undefined
+  const address = imageAddress(target, baseDir)
+  try {
+    return pathToFileURL(address).href
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Degrade the image syntax on one line, leaving inline code spans untouched.
+ * The image becomes a link (or its plain address when no link can be formed).
+ */
+function degradeInlineImages(line: string, baseDir: string): string {
   return line.split(INLINE_CODE).map(part => {
     if (part.startsWith('`')) return part
     return part
@@ -345,22 +247,22 @@ function degradeInlineImages(line: string, baseDir: string, linkFor?: ImageLinke
         const target = raw.trim().replace(/^<|>$/g, '').replace(/\s+"[^"]*"$/, '')
         if (IMAGE_KEY.test(target)) return match
         const label = imageLabel(alt)
-        if (URL_LIKE.test(target)) return `${label}(${target})`
+        const link = imageLink(target, baseDir)
+        if (link !== undefined) return `${label}(${link})`
+        if (/^data:/i.test(target)) return label
         const address = imageAddress(target, baseDir)
-        const link = linkFor?.(address)
-        return link === undefined ? `${label}（\`${address}\`）` : `${label}(${link})`
+        return address === '' ? label : `${label}（\`${address}\`）`
       })
       .replace(IMAGE_REFERENCE, (_match, alt: string) => imageLabel(alt))
   }).join('')
 }
 
 /**
- * Rewrite Markdown images that Feishu would reject: local paths become links to
- * this plugin's local image route (or their plain address when no origin is
- * available), remote URLs become ordinary links, and fenced/inline code keeps
- * its content verbatim.
+ * Rewrite Markdown images that Feishu would reject: local paths become `file:`
+ * links a browser opens directly, remote URLs become ordinary links, and
+ * fenced/inline code keeps its content verbatim.
  */
-export function degradeImages(text: string, baseDir = '', linkFor?: ImageLinker): string {
+export function degradeImages(text: string, baseDir = ''): string {
   if (!text.includes('![')) return text
   let fence: string | undefined
   const lines: string[] = []
@@ -373,7 +275,7 @@ export function degradeImages(text: string, baseDir = '', linkFor?: ImageLinker)
       }
       continue
     }
-    lines.push(degradeInlineImages(line, baseDir, linkFor))
+    lines.push(degradeInlineImages(line, baseDir))
     const open = FENCE_LINE.exec(line)
     if (open !== null) fence = open[1]
   }
@@ -464,12 +366,11 @@ export function notificationCard(
   output: string,
   sessionTitle = '',
   baseDir = '',
-  linkFor?: ImageLinker,
 ): Record<string, unknown> {
   return cardPayload(
     titleFor(kind, sessionTitle),
     templateFor(kind),
-    bodyFor(detail, degradeImages(output, baseDir, linkFor)),
+    bodyFor(detail, degradeImages(output, baseDir)),
   )
 }
 
@@ -610,12 +511,11 @@ function notify(
   output = '',
   sessionTitle = '',
   baseDir = '',
-  linkFor?: ImageLinker,
 ): void {
   if (!config.enabled.get()) return
   const webhook = config.webhook.get().trim()
   if (webhook === '') return
-  const parts = splitOutput(degradeImages(output.trim(), baseDir, linkFor))
+  const parts = splitOutput(degradeImages(output.trim(), baseDir))
   const total = parts.length
   const interval = sendIntervalFor(total)
   const send = async (): Promise<void> => {
@@ -650,10 +550,6 @@ export function apply(ctx: Context, config: Config): void {
   // subagent sessions and concurrent conversations interleave in this handler.
   const finalOutput = new Map<string, string>()
 
-  // Local images referenced by an answer are linked to this plugin's own
-  // route, so a click on the notification opens the file in the local browser.
-  const imageLinks = registerImageLinks(ctx)
-
   ctx.on('approval/request', (request, next) => {
     notify(
       config,
@@ -662,7 +558,6 @@ export function apply(ctx: Context, config: Config): void {
       '',
       sessionTitleOf(ctx, request.agent?.session),
       sessionCwdOf(request.agent?.session),
-      imageLinks.linkFor,
     )
     return next()
   })
@@ -690,7 +585,6 @@ export function apply(ctx: Context, config: Config): void {
         output,
         sessionTitleOf(ctx, session),
         sessionCwdOf(session),
-        imageLinks.linkFor,
       )
     }
     // 等待用户决策的记录有两种形态，必须都认，否则会漏通知：
@@ -710,7 +604,6 @@ export function apply(ctx: Context, config: Config): void {
           '',
           sessionTitleOf(ctx, session),
           sessionCwdOf(session),
-          imageLinks.linkFor,
         )
       }
     }

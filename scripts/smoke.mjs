@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { satisfies } from 'semver'
 
 let failures = 0
@@ -175,21 +176,21 @@ check('fence handling keeps the whole fenced content',
   fencedParts.join('\n').includes('const value = 1') && fencedParts.join('\n').includes('结尾'))
 
 // Feishu accepts only image_keys from its upload API in card Markdown; a local
-// path or plain URL makes it reject the entire card, so those images are
-// rewritten as text before the card is built.
-check('a local-path image becomes plain text with its address',
-  host.degradeImages('看图 ![预览](.tmp/a.png) 结束') === '看图 [图片：预览]（`.tmp/a.png`） 结束')
-check('a relative image address resolves against the session directory',
-  host.degradeImages('![预览](.tmp/a.png)', 'J:/work') === `[图片：预览]（\`${resolvePath('J:/work', '.tmp/a.png')}\`）`)
-check('an absolute image address is kept as written',
-  host.degradeImages('![预览](E:/shots/a.png)', 'J:/work') === '[图片：预览]（`E:/shots/a.png`）')
-check('an image without alt text becomes [图片] with its address',
-  host.degradeImages('![](x.png)') === '[图片]（`x.png`）')
+// path or plain URL makes it reject the entire card. A local path therefore
+// becomes a file: link the browser can open directly.
+const fileUrlOf = (path) => pathToFileURL(resolvePath(path)).href
+check('a local image becomes a file link',
+  host.degradeImages('看图 ![预览](.tmp/a.png) 结束', 'J:/work')
+  === `看图 [图片：预览](${fileUrlOf(resolvePath('J:/work', '.tmp/a.png'))}) 结束`)
+check('an absolute local image keeps its path in the file link',
+  host.degradeImages('![预览](E:/shots/a.png)', 'J:/work')
+  === `[图片：预览](${fileUrlOf('E:/shots/a.png')})`)
+check('an image without alt text becomes [图片] plus its link',
+  host.degradeImages('![](x.png)', 'J:/work') === `[图片](${fileUrlOf(resolvePath('J:/work', 'x.png'))})`)
 check('a remote image URL becomes a plain link',
   host.degradeImages('![预览](https://example.com/a.png)') === '[图片：预览](https://example.com/a.png)')
-check('a local image becomes a link through the image route',
-  host.degradeImages('![预览](.tmp/a.png)', '', () => 'http://127.0.0.1:12345/api/feishu-notifier/image?id=x')
-  === '[图片：预览](http://127.0.0.1:12345/api/feishu-notifier/image?id=x)')
+check('a data URI is only labelled because it cannot be linked',
+  host.degradeImages('![预览](data:image/png;base64,AAAA)') === '[图片：预览]')
 check('an uploaded Feishu image key is kept',
   host.degradeImages('![预览](img_v3_0238_abc-def)') === '![预览](img_v3_0238_abc-def)')
 check('reference-style images degrade',
@@ -198,9 +199,9 @@ check('image syntax inside a fenced code block is left alone',
   host.degradeImages('```md\n![x](y.png)\n```') === '```md\n![x](y.png)\n```')
 check('image syntax inside inline code is left alone',
   host.degradeImages('`![x](y.png)`') === '`![x](y.png)`')
-check('the hosted card body no longer carries a raw image',
-  host.notificationCard('turn-end', 'd', '![预览](.tmp/a.png)').card.body.elements[0].content
-  === 'd\n\n[图片：预览]（`.tmp/a.png`）')
+check('the hosted card body links a local image instead of embedding it',
+  host.notificationCard('turn-end', 'd', '![预览](a.png)', '', 'J:/work').card.body.elements[0].content
+  === `d\n\n[图片：预览](${fileUrlOf(resolvePath('J:/work', 'a.png'))})`)
 
 check('a card with nothing to say falls back to its title',
   host.notificationCard('turn-end', '', '').card.body.elements[0].content === 'DSH 对话已结束')
@@ -230,10 +231,7 @@ function stubHostCtx(options = {}) {
     // way so profiles without it still load the plugin.
     get: (service) => (service === 'sessionTitle' ? options.titles : undefined),
     settings: { configure: (policy, owner) => { state.configured = { policy, owner }; return () => {} } },
-    webServer: {
-      register: (route) => { state.routes.push(route); return () => {} },
-      getOrigin: () => options.origin ?? 'http://127.0.0.1:12345',
-    },
+    webServer: { register: (route) => { state.routes.push(route); return () => {} } },
   }
 }
 
@@ -254,10 +252,8 @@ host.apply(ctx, config)
 
 check('apply configures settings page policy auto:false', ctx.state.configured?.policy?.auto === false)
 check('apply binds the policy to this fiber', ctx.state.configured?.owner === ctx.fiber)
-check('apply registers the exact test route', ctx.state.routes.some(route =>
-  route.kind === 'exact' && route.path === '/api/feishu-notifier/test'))
-check('apply registers the local image route', ctx.state.routes.some(route =>
-  route.kind === 'exact' && route.path === '/api/feishu-notifier/image'))
+check('apply registers the exact test route', ctx.state.routes.length === 1
+  && ctx.state.routes[0].kind === 'exact' && ctx.state.routes[0].path === '/api/feishu-notifier/test')
 check('apply registers approval/request', typeof ctx.state.listeners['approval/request'] === 'function')
 check('apply registers session/event', typeof ctx.state.listeners['session/event'] === 'function')
 
@@ -450,14 +446,9 @@ imageCtx.state.listeners['session/event'](imageSession, { type: 'turn/end', data
 await tick()
 check('a turn-end answer with a local image is still delivered', sent.length === beforeImage + 1)
 const imageCardText = cardTextOf(sent.at(-1))
-const imageLink = /\[图片：预览\]\((http:\/\/127\.0\.0\.1:12345\/api\/feishu-notifier\/image\?id=([0-9a-f-]+))\)/.exec(imageCardText)
-check('the card links the local image through the plugin route',
-  imageLink !== null && imageCardText.includes('![') === false)
-const imageRoute = imageCtx.state.routes.find(route => route.path === '/api/feishu-notifier/image')
-const imageHead = { status: undefined, headers: {}, writeHead(status, headers) { this.status = status; this.headers = headers }, end() {} }
-await imageRoute.handler({ method: 'HEAD', url: `/api/feishu-notifier/image?id=${imageLink?.[2] ?? ''}` }, imageHead)
-check('the local image route serves the referenced image',
-  imageHead.status === 200 && imageHead.headers['content-type'] === 'image/png')
+const expectedImageLink = `[图片：预览](${fileUrlOf(resolvePath(process.cwd(), 'docs/images/1.png'))})`
+check('the card links the local image with a file URL',
+  imageCardText.includes(expectedImageLink) && imageCardText.includes('![') === false)
 
 // -------------------------------------------------------------- client half
 let module
