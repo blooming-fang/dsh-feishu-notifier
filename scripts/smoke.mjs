@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'node:fs'
+import { resolve as resolvePath } from 'node:path'
 import { satisfies } from 'semver'
 
 let failures = 0
@@ -176,12 +177,16 @@ check('fence handling keeps the whole fenced content',
 // Feishu accepts only image_keys from its upload API in card Markdown; a local
 // path or plain URL makes it reject the entire card, so those images are
 // rewritten as text before the card is built.
-check('a local-path image becomes plain text',
-  host.degradeImages('看图 ![预览](.tmp/a.png) 结束') === '看图 [图片：预览] 结束')
-check('an image without alt text becomes [图片]',
-  host.degradeImages('![](x.png)') === '[图片]')
-check('a remote image URL is degraded too',
-  host.degradeImages('![预览](https://example.com/a.png)') === '[图片：预览]')
+check('a local-path image becomes plain text with its address',
+  host.degradeImages('看图 ![预览](.tmp/a.png) 结束') === '看图 [图片：预览]（`.tmp/a.png`） 结束')
+check('a relative image address resolves against the session directory',
+  host.degradeImages('![预览](.tmp/a.png)', 'J:/work') === `[图片：预览]（\`${resolvePath('J:/work', '.tmp/a.png')}\`）`)
+check('an absolute image address is kept as written',
+  host.degradeImages('![预览](E:/shots/a.png)', 'J:/work') === '[图片：预览]（`E:/shots/a.png`）')
+check('an image without alt text becomes [图片] with its address',
+  host.degradeImages('![](x.png)') === '[图片]（`x.png`）')
+check('a remote image URL is degraded to text with the URL',
+  host.degradeImages('![预览](https://example.com/a.png)') === '[图片：预览]（https://example.com/a.png）')
 check('an uploaded Feishu image key is kept',
   host.degradeImages('![预览](img_v3_0238_abc-def)') === '![预览](img_v3_0238_abc-def)')
 check('reference-style images degrade',
@@ -192,7 +197,7 @@ check('image syntax inside inline code is left alone',
   host.degradeImages('`![x](y.png)`') === '`![x](y.png)`')
 check('the hosted card body no longer carries a raw image',
   host.notificationCard('turn-end', 'd', '![预览](.tmp/a.png)').card.body.elements[0].content
-  === 'd\n\n[图片：预览]')
+  === 'd\n\n[图片：预览]（`.tmp/a.png`）')
 
 check('a card with nothing to say falls back to its title',
   host.notificationCard('turn-end', '', '').card.body.elements[0].content === 'DSH 对话已结束')
@@ -435,6 +440,22 @@ check('a turn-end answer with a local image is still delivered', sent.length ===
 const imageCardText = cardTextOf(sent.at(-1))
 check('the delivered card carries plain text instead of the image',
   imageCardText.includes('[图片：预览]') && imageCardText.includes('![') === false)
+
+// The address comes from the session's working directory, so a relative path
+// in the answer becomes a location the reader can actually open.
+const cwdCtx = stubHostCtx({ titles })
+host.apply(cwdCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
+const beforeCwd = sent.length
+const cwdSession = { header: { id: 'session-cwd', cwd: 'J:/work' } }
+cwdCtx.state.listeners['session/event'](cwdSession, {
+  type: 'assistant/message',
+  data: { turn: 11, step: 1, message: { content: [{ type: 'text', text: '看图 ![预览](.tmp/a.png)' }] } },
+})
+cwdCtx.state.listeners['session/event'](cwdSession, { type: 'turn/end', data: { turn: 11, reason: { kind: 'completed' } } })
+await tick()
+check('a delivered card resolves the image address against the session cwd',
+  sent.length === beforeCwd + 1
+  && cardTextOf(sent.at(-1)).includes(resolvePath('J:/work', '.tmp/a.png')))
 
 // -------------------------------------------------------------- client half
 let module

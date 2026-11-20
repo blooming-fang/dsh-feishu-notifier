@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { isAbsolute, resolve } from 'node:path'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -129,6 +130,13 @@ function sessionTitleOf(ctx: Context, session: unknown): string {
   }
 }
 
+/** Working directory of a session, used to resolve relative image paths. */
+function sessionCwdOf(session: unknown): string {
+  const header = recordOf(session)?.header
+  const cwd = recordOf(header)?.cwd
+  return typeof cwd === 'string' ? cwd : ''
+}
+
 /**
  * Card body: the one-line reason, then the agent's final visible output (or
  * its first card-sized part), so the push carries the answer itself instead of
@@ -189,6 +197,7 @@ const IMAGE_KEY = /^img_[A-Za-z0-9._-]+$/
 const IMAGE_INLINE = /!\[([^\]]*)\]\(([^)]*)\)/g
 const IMAGE_REFERENCE = /!\[([^\]]*)\]\[([^\]]*)\]/g
 const INLINE_CODE = /(`+[^`]*`+)/g
+const URL_LIKE = /^(?:https?|data|file):/i
 
 /** Plain-text stand-in for one image that cannot be delivered. */
 function imageLabel(alt: string): string {
@@ -196,25 +205,43 @@ function imageLabel(alt: string): string {
   return text === '' ? '[图片]' : `[图片：${text}]`
 }
 
-/** Degrade the image syntax on one line, leaving inline code spans untouched. */
-function degradeInlineImages(line: string): string {
+/**
+ * The address printed for one image. A relative path is resolved against the
+ * session's working directory, so the notification names a location the reader
+ * can actually find; URLs and absolute paths are kept as written.
+ */
+function imageAddress(target: string, baseDir: string): string {
+  if (baseDir !== '' && !isAbsolute(target) && !URL_LIKE.test(target)) {
+    return resolve(baseDir, target)
+  }
+  return target
+}
+
+/**
+ * Degrade the image syntax on one line, leaving inline code spans untouched.
+ * A local address becomes inline code so backslashes stay literal.
+ */
+function degradeInlineImages(line: string, baseDir: string): string {
   return line.split(INLINE_CODE).map(part => {
     if (part.startsWith('`')) return part
     return part
       .replace(IMAGE_INLINE, (match, alt: string, raw: string) => {
         const target = raw.trim().replace(/^<|>$/g, '').replace(/\s+"[^"]*"$/, '')
-        return IMAGE_KEY.test(target) ? match : imageLabel(alt)
+        if (IMAGE_KEY.test(target)) return match
+        const address = imageAddress(target, baseDir)
+        const shown = URL_LIKE.test(target) ? address : `\`${address}\``
+        return `${imageLabel(alt)}（${shown}）`
       })
       .replace(IMAGE_REFERENCE, (_match, alt: string) => imageLabel(alt))
   }).join('')
 }
 
 /**
- * Rewrite Markdown images that Feishu would reject into plain text. Fenced code
- * blocks and inline code keep their content verbatim, so examples of image
- * syntax are not altered.
+ * Rewrite Markdown images that Feishu would reject into plain text that keeps
+ * the alt text and the file address. Fenced code blocks and inline code keep
+ * their content verbatim, so examples of image syntax are not altered.
  */
-export function degradeImages(text: string): string {
+export function degradeImages(text: string, baseDir = ''): string {
   if (!text.includes('![')) return text
   let fence: string | undefined
   const lines: string[] = []
@@ -227,7 +254,7 @@ export function degradeImages(text: string): string {
       }
       continue
     }
-    lines.push(degradeInlineImages(line))
+    lines.push(degradeInlineImages(line, baseDir))
     const open = FENCE_LINE.exec(line)
     if (open !== null) fence = open[1]
   }
@@ -317,8 +344,13 @@ export function notificationCard(
   detail: string,
   output: string,
   sessionTitle = '',
+  baseDir = '',
 ): Record<string, unknown> {
-  return cardPayload(titleFor(kind, sessionTitle), templateFor(kind), bodyFor(detail, degradeImages(output)))
+  return cardPayload(
+    titleFor(kind, sessionTitle),
+    templateFor(kind),
+    bodyFor(detail, degradeImages(output, baseDir)),
+  )
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -457,11 +489,12 @@ function notify(
   detail: string,
   output = '',
   sessionTitle = '',
+  baseDir = '',
 ): void {
   if (!config.enabled.get()) return
   const webhook = config.webhook.get().trim()
   if (webhook === '') return
-  const parts = splitOutput(degradeImages(output.trim()))
+  const parts = splitOutput(degradeImages(output.trim(), baseDir))
   const total = parts.length
   const interval = sendIntervalFor(total)
   const send = async (): Promise<void> => {
@@ -503,6 +536,7 @@ export function apply(ctx: Context, config: Config): void {
       request.reason ?? `工具 ${request.toolName} 正在等待批准。`,
       '',
       sessionTitleOf(ctx, request.agent?.session),
+      sessionCwdOf(request.agent?.session),
     )
     return next()
   })
@@ -529,6 +563,7 @@ export function apply(ctx: Context, config: Config): void {
         `第 ${String(event.data.turn)} 轮：${turnReasonText(event.data.reason)}`,
         output,
         sessionTitleOf(ctx, session),
+        sessionCwdOf(session),
       )
     }
     // 等待用户决策的记录有两种形态，必须都认，否则会漏通知：
@@ -540,7 +575,9 @@ export function apply(ctx: Context, config: Config): void {
     if (eventType === 'tool/call' || eventType === 'tool/ptc-dispatch-start') {
       const toolName = recordOf(event.data)?.name
       const detail = typeof toolName === 'string' ? DECISION_TOOLS.get(toolName) : undefined
-      if (detail !== undefined) notify(config, 'approval', detail, '', sessionTitleOf(ctx, session))
+      if (detail !== undefined) {
+        notify(config, 'approval', detail, '', sessionTitleOf(ctx, session), sessionCwdOf(session))
+      }
     }
   })
 

@@ -98,7 +98,12 @@ pnpm dsh plugin --profile demo add github:blooming-fang/dsh-feishu-notifier
 
 测试消息没有所属会话，标题固定为「DSH 飞书通知测试」；带会话名的标题只出现在真实通知里。
 
-图片：飞书卡片里的 Markdown 图片只接受由「上传图片」接口换来的 `image_key`（语法 `![hover_text](image_key)`），而自定义机器人 Webhook 本身没有上传能力。正文里一旦出现 `![预览](.tmp/a.png)` 这样的本地路径或普通 URL，飞书会以 `200570: card contains invalid image keys` **拒收整张卡片**，整条通知就丢了。插件会在发送前把这类图片降级为纯文本 `[图片：预览]`（保留 alt 文案），代码块与行内代码里的图片语法保持原样，只有已经是 `img_...` 的合法 key 会原样保留。
+图片：飞书卡片里的 Markdown 图片只接受由「上传图片」接口换来的 `image_key`（语法 `![hover_text](image_key)`），而自定义机器人 Webhook 本身没有上传能力。正文里一旦出现 `![预览](.tmp/a.png)` 这样的本地路径或普通 URL，飞书会以 `200570: card contains invalid image keys` **拒收整张卡片**，整条通知就丢了。插件会在发送前把这类图片降级为纯文本并保留图片地址，例如 ``[图片：预览]（`.tmp/a.png`）``：
+
+- 相对路径会按该会话的工作目录解析成绝对路径（如 `J:\work\.tmp\a.png`），方便直接定位文件；
+- 地址用行内代码包裹，避免 Windows 反斜杠被 Markdown 当成转义符；
+- 没有 alt 文案时显示 `[图片]（地址）`；普通 URL 则原样附带；
+- 代码块与行内代码里的图片语法保持原样，只有已经是 `img_...` 的合法 key 会原样保留。
 
 如果确实需要在通知里发图，需要另行配置一个自建应用（App ID / App Secret、`im:image` 权限）把图片上传换成 `image_key` 再替换，这属于后续可选增强；当前 Webhook 方案下以「通知能送达」优先，因此选择降级。
 
@@ -111,6 +116,11 @@ Webhook 属于敏感设置（Config 中声明为 `role('secret')`），保存后
 
 
 ## 从旧版本升级
+
+### 从 0.3.9 升级到 0.3.10
+
+- 变更：图片降级文本追加图片地址，形如 ``[图片：预览]（`.tmp/a.png`）``；相对路径按会话工作目录解析为绝对路径（`J:\work\.tmp\a.png`），地址用行内代码包裹避免 Windows 反斜杠被 Markdown 转义；无 alt 时显示 `[图片]（地址）`，普通 URL 原样附带。
+- `scripts/smoke.mjs` 增加地址输出、相对路径解析、绝对路径保留、URL 附带，以及按会话 cwd 解析地址的端到端断言。
 
 ### 从 0.3.8 升级到 0.3.9
 
