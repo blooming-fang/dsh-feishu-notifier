@@ -178,6 +178,63 @@ function safeCut(text: string, max: number): number {
 }
 
 /**
+ * Feishu card images must reference an `image_key` returned by the image
+ * upload API. A custom-bot webhook has no upload capability, and an image
+ * pointing at a local path or an ordinary URL makes Feishu reject the whole
+ * card (`200570: card contains invalid image keys`) — the notification is
+ * lost, not just the picture. Those images are therefore rewritten as plain
+ * text that keeps the alt text, so the card still arrives.
+ */
+const IMAGE_KEY = /^img_[A-Za-z0-9._-]+$/
+const IMAGE_INLINE = /!\[([^\]]*)\]\(([^)]*)\)/g
+const IMAGE_REFERENCE = /!\[([^\]]*)\]\[([^\]]*)\]/g
+const INLINE_CODE = /(`+[^`]*`+)/g
+
+/** Plain-text stand-in for one image that cannot be delivered. */
+function imageLabel(alt: string): string {
+  const text = alt.trim()
+  return text === '' ? '[图片]' : `[图片：${text}]`
+}
+
+/** Degrade the image syntax on one line, leaving inline code spans untouched. */
+function degradeInlineImages(line: string): string {
+  return line.split(INLINE_CODE).map(part => {
+    if (part.startsWith('`')) return part
+    return part
+      .replace(IMAGE_INLINE, (match, alt: string, raw: string) => {
+        const target = raw.trim().replace(/^<|>$/g, '').replace(/\s+"[^"]*"$/, '')
+        return IMAGE_KEY.test(target) ? match : imageLabel(alt)
+      })
+      .replace(IMAGE_REFERENCE, (_match, alt: string) => imageLabel(alt))
+  }).join('')
+}
+
+/**
+ * Rewrite Markdown images that Feishu would reject into plain text. Fenced code
+ * blocks and inline code keep their content verbatim, so examples of image
+ * syntax are not altered.
+ */
+export function degradeImages(text: string): string {
+  if (!text.includes('![')) return text
+  let fence: string | undefined
+  const lines: string[] = []
+  for (const line of text.split('\n')) {
+    if (fence !== undefined) {
+      lines.push(line)
+      const close = FENCE_LINE.exec(line)
+      if (close !== null && close[1][0] === fence[0] && close[1].length >= fence.length && close[2].trim() === '') {
+        fence = undefined
+      }
+      continue
+    }
+    lines.push(degradeInlineImages(line))
+    const open = FENCE_LINE.exec(line)
+    if (open !== null) fence = open[1]
+  }
+  return lines.join('\n')
+}
+
+/**
  * Split the visible output into card-sized parts.
  *
  * Cuts prefer line boundaries and cut a line only when it alone exceeds the
@@ -261,7 +318,7 @@ export function notificationCard(
   output: string,
   sessionTitle = '',
 ): Record<string, unknown> {
-  return cardPayload(titleFor(kind, sessionTitle), templateFor(kind), bodyFor(detail, output))
+  return cardPayload(titleFor(kind, sessionTitle), templateFor(kind), bodyFor(detail, degradeImages(output)))
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -404,7 +461,7 @@ function notify(
   if (!config.enabled.get()) return
   const webhook = config.webhook.get().trim()
   if (webhook === '') return
-  const parts = splitOutput(output.trim())
+  const parts = splitOutput(degradeImages(output.trim()))
   const total = parts.length
   const interval = sendIntervalFor(total)
   const send = async (): Promise<void> => {

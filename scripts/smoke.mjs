@@ -172,6 +172,28 @@ check('a fenced code block is closed and reopened across the cut',
   && fencedParts[1].startsWith('```js'))
 check('fence handling keeps the whole fenced content',
   fencedParts.join('\n').includes('const value = 1') && fencedParts.join('\n').includes('结尾'))
+
+// Feishu accepts only image_keys from its upload API in card Markdown; a local
+// path or plain URL makes it reject the entire card, so those images are
+// rewritten as text before the card is built.
+check('a local-path image becomes plain text',
+  host.degradeImages('看图 ![预览](.tmp/a.png) 结束') === '看图 [图片：预览] 结束')
+check('an image without alt text becomes [图片]',
+  host.degradeImages('![](x.png)') === '[图片]')
+check('a remote image URL is degraded too',
+  host.degradeImages('![预览](https://example.com/a.png)') === '[图片：预览]')
+check('an uploaded Feishu image key is kept',
+  host.degradeImages('![预览](img_v3_0238_abc-def)') === '![预览](img_v3_0238_abc-def)')
+check('reference-style images degrade',
+  host.degradeImages('![预览][ref]') === '[图片：预览]')
+check('image syntax inside a fenced code block is left alone',
+  host.degradeImages('```md\n![x](y.png)\n```') === '```md\n![x](y.png)\n```')
+check('image syntax inside inline code is left alone',
+  host.degradeImages('`![x](y.png)`') === '`![x](y.png)`')
+check('the hosted card body no longer carries a raw image',
+  host.notificationCard('turn-end', 'd', '![预览](.tmp/a.png)').card.body.elements[0].content
+  === 'd\n\n[图片：预览]')
+
 check('a card with nothing to say falls back to its title',
   host.notificationCard('turn-end', '', '').card.body.elements[0].content === 'DSH 对话已结束')
 check('a named card puts the session in the title',
@@ -397,6 +419,22 @@ const rejoined = paginatedCards
   .map((card, index) => cardTextOf(card).replace(index === 0 ? '第 9 轮：正常完成\n\n' : '', ''))
   .join('\n')
 check('the cards together carry the whole answer once', rejoined === longAnswer)
+
+// A real turn whose answer shows a local screenshot must still be delivered:
+// the image is degraded, not left in the card for Feishu to reject.
+const imageCtx = stubHostCtx({ titles })
+host.apply(imageCtx, host.Config({ enabled: true, webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/stub' }))
+const beforeImage = sent.length
+imageCtx.state.listeners['session/event'](main, {
+  type: 'assistant/message',
+  data: { turn: 10, step: 1, message: { content: [{ type: 'text', text: '看渲染：![预览](.tmp/preview.png) 已完成。' }] } },
+})
+imageCtx.state.listeners['session/event'](main, { type: 'turn/end', data: { turn: 10, reason: { kind: 'completed' } } })
+await tick()
+check('a turn-end answer with a local image is still delivered', sent.length === beforeImage + 1)
+const imageCardText = cardTextOf(sent.at(-1))
+check('the delivered card carries plain text instead of the image',
+  imageCardText.includes('[图片：预览]') && imageCardText.includes('![') === false)
 
 // -------------------------------------------------------------- client half
 let module

@@ -98,6 +98,10 @@ pnpm dsh plugin --profile demo add github:blooming-fang/dsh-feishu-notifier
 
 测试消息没有所属会话，标题固定为「DSH 飞书通知测试」；带会话名的标题只出现在真实通知里。
 
+图片：飞书卡片里的 Markdown 图片只接受由「上传图片」接口换来的 `image_key`（语法 `![hover_text](image_key)`），而自定义机器人 Webhook 本身没有上传能力。正文里一旦出现 `![预览](.tmp/a.png)` 这样的本地路径或普通 URL，飞书会以 `200570: card contains invalid image keys` **拒收整张卡片**，整条通知就丢了。插件会在发送前把这类图片降级为纯文本 `[图片：预览]`（保留 alt 文案），代码块与行内代码里的图片语法保持原样，只有已经是 `img_...` 的合法 key 会原样保留。
+
+如果确实需要在通知里发图，需要另行配置一个自建应用（App ID / App Secret、`im:image` 权限）把图片上传换成 `image_key` 再替换，这属于后续可选增强；当前 Webhook 方案下以「通知能送达」优先，因此选择降级。
+
 以下两种情况不会发送通知：
 
 - **用户主动停止**：轮次以 `aborted`（取消原因为 `user`）结束时保持静默，因为此时用户就在 DSH 界面旁，飞书推送只会形成干扰。由父代理、钩子或会话释放造成的取消不算用户主动停止，仍会照常通知。
@@ -107,6 +111,12 @@ Webhook 属于敏感设置（Config 中声明为 `role('secret')`），保存后
 
 
 ## 从旧版本升级
+
+### 从 0.3.8 升级到 0.3.9
+
+- 修复：助手输出里含本地路径或普通 URL 的 Markdown 图片时，飞书会以 `200570: card contains invalid image keys` 拒收**整张卡片**，导致结束通知静默丢失。现在发送前会把这类图片降级为纯文本 `[图片：alt]`，通知能正常送达；代码块与行内代码中的图片语法不受影响，合法 `img_...` key 原样保留。
+- `scripts/smoke.mjs` 增加降级回归：本地路径、普通 URL、无 alt、reference 风格、fenced/行内代码保护、合法 image_key 保留，以及含本地图片的轮次结束仍能发出卡片。
+- README 补充飞书图片要求与降级原因；如需真正发图，需自建应用上传换 `image_key`（`im:image` 权限），作为后续增强。
 
 ### 从 0.3.7 升级到 0.3.8
 
